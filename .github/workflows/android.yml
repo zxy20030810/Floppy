@@ -21,14 +21,19 @@ jobs:
         distribution: 'temurin'
         cache: gradle
 
+    - name: Setup Android SDK
+      uses: android-actions/setup-android@v3
+      with:
+        api-level: 36
+        build-tools: '34.0.0'
+        ndk: '25.1.8937393'
+        cmake: '3.22.1'
+
     - name: Grant execute permission for gradlew
       run: chmod +x gradlew
 
     - name: Build with Gradle
       run: GRADLE_USER_HOME=.gradle-home ./gradlew test assembleDebug
-      env:
-        ANDROID_HOME: /usr/local/lib/android/sdk
-        ANDROID_SDK_ROOT: /usr/local/lib/android/sdk
 
     - name: Upload build artifacts
       uses: actions/upload-artifact@v4
@@ -52,14 +57,17 @@ jobs:
         distribution: 'temurin'
         cache: gradle
 
+    - name: Setup Android SDK
+      uses: android-actions/setup-android@v3
+      with:
+        api-level: 36
+        build-tools: '34.0.0'
+
     - name: Grant execute permission for gradlew
       run: chmod +x gradlew
 
     - name: Build Release APK
       run: GRADLE_USER_HOME=.gradle-home ./gradlew assembleRelease
-      env:
-        ANDROID_HOME: /usr/local/lib/android/sdk
-        ANDROID_SDK_ROOT: /usr/local/lib/android/sdk
 
     - name: Upload Release APK
       uses: actions/upload-artifact@v4
