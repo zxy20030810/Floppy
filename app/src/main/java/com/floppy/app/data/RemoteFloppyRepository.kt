@@ -51,6 +51,7 @@ class RemoteFloppyRepository(
     private val profileState = MutableStateFlow<UserProfile?>(initialProfile)
     private val libraryState = MutableStateFlow(FallbackAudioLibrary.library())
     private val settingsState = MutableStateFlow(AppSettings(profile = initialProfile ?: UserProfile()))
+    private val playbackRecordIdsByAudioId = mutableMapOf<String, String>()
 
     override val profile: Flow<UserProfile?> = profileState.asStateFlow()
     override val library: Flow<AudioLibrary> = libraryState.asStateFlow()
@@ -96,18 +97,22 @@ class RemoteFloppyRepository(
     override suspend fun pollGenerationTask(taskId: String): GenerationTask = api.getGenerationTask(taskId)
 
     override suspend fun addToHistory(audio: AudioItem) {
-        val reported = runCatching {
-            api.reportAudioHistory(
+        val reported = audio.withPlayableUrl()
+        runCatching {
+            api.startPlayback(
                 userId,
-                HistoryReportRequest(
+                PlaybackStartRequest(
                     audioId = audio.id,
                     source = audio.source.name,
                     durationSeconds = audio.durationSeconds,
                     playbackProgress = audio.playbackProgress
                 )
-            ).withPlayableUrl()
-        }.getOrElse { audio.withPlayableUrl() }
-            .mergePlayableFields(audio.withPlayableUrl())
+            )
+        }.onSuccess { response ->
+            response.recordId?.takeIf { it.isNotBlank() }?.let { recordId ->
+                playbackRecordIdsByAudioId[audio.id] = recordId
+            }
+        }
         libraryState.update { library ->
             library.copy(history = listOf(reported) + library.history.filterNot { it.id == reported.id })
         }
@@ -166,7 +171,7 @@ class RemoteFloppyRepository(
                             upload.copy(
                                 status = UploadStatus.Failed,
                                 progress = 0f,
-                                message = error.message ?: "Upload failed"
+                                message = "Upload failed"
                             )
                         } else {
                             upload
@@ -200,7 +205,21 @@ class RemoteFloppyRepository(
         }
     }
 
-    override suspend fun submitFeedback(feedback: Feedback): FeedbackResponse = api.submitFeedback(feedback)
+    override suspend fun submitFeedback(feedback: Feedback): FeedbackResponse {
+        val recordId = playbackRecordIdsByAudioId[feedback.audioId]
+        return if (recordId != null) {
+            api.submitPlaybackFeedback(
+                userId = userId,
+                recordId = recordId,
+                request = PlaybackFeedbackRequest(
+                    rating = feedback.rating,
+                    reason = feedback.reason
+                )
+            )
+        } else {
+            api.submitFeedback(feedback)
+        }
+    }
 
     override suspend fun submitTextIntent(request: TextIntentRequest): TextIntentResponse {
         val response = api.submitTextIntent(request.copy(userId = userId))

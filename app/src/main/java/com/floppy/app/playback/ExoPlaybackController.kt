@@ -58,7 +58,7 @@ class ExoPlaybackController(context: Context) : PlaybackController {
                     playbackState.update {
                         it.copy(
                             state = PlaybackState.Failed,
-                            errorMessage = error.message ?: "播放失败，请稍后再试"
+                            errorMessage = "播放失败，请稍后再试"
                         )
                     }
                 }

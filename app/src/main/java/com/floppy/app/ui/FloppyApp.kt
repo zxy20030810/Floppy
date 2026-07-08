@@ -1528,10 +1528,10 @@ private fun HomeScreen(
     onOpenSettings: () -> Unit,
     onPauseOrResume: () -> Unit
 ) {
-    val activeAudio = state.activeAudio ?: state.library.recommended.firstOrNull()
+    val activeAudio = state.playback.currentAudio ?: state.activeAudio
     val isPlaying = state.playback.state == PlaybackState.Playing ||
         state.playback.state == PlaybackState.Buffering
-    val hasPlaybackAudio = state.playback.currentAudio != null || state.activeAudio != null
+    val hasPlaybackAudio = state.playback.currentAudio != null
     val isDogListening = state.isListening
     val isSignalAnimating = isPlaying ||
         state.isListening ||

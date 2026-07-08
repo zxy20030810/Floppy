@@ -30,6 +30,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import java.io.IOException
 import java.util.Locale
 import java.util.UUID
 
@@ -751,6 +752,7 @@ class FloppyViewModel(
                                     it.copy(
                                         agentState = AgentState.Failed,
                                         errorMessage = nextTask.message.toUserFacingMessage()
+                                            ?: "生成失败，请稍后再试"
                                     )
                                 }
                                 return@launch
@@ -814,6 +816,8 @@ private fun Throwable.toUserFacingMessage(fallback: String): String? {
     return when {
         cleanMessage.isNullOrEmpty() -> fallback
         cleanMessage.isHiddenTransientMessage() -> null
+        this is IOException -> fallback
+        cleanMessage.isTechnicalFailureMessage() -> fallback
         else -> cleanMessage
     }
 }
@@ -823,8 +827,30 @@ private fun String?.toUserFacingMessage(): String? {
     return cleanMessage
         .takeIf { it.isNotEmpty() }
         ?.takeUnless { it.isHiddenTransientMessage() }
+        ?.takeUnless { it.isTechnicalFailureMessage() }
 }
 
 private fun String.isHiddenTransientMessage(): Boolean {
     return equals("connection closed", ignoreCase = true)
+}
+
+private fun String.isTechnicalFailureMessage(): Boolean {
+    val lowerMessage = lowercase(Locale.US)
+    return listOf(
+        "failed to connect",
+        "unable to resolve host",
+        "timeout",
+        "timed out",
+        "connection reset",
+        "connection refused",
+        "network is unreachable",
+        "no route to host",
+        "socket",
+        "ssl",
+        "certificate",
+        "java.net.",
+        "okhttp",
+        "retrofit"
+    ).any { token -> lowerMessage.contains(token) } ||
+        Regex("""\bhttp\s+\d{3}\b""").containsMatchIn(lowerMessage)
 }

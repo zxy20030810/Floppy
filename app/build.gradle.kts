@@ -9,9 +9,9 @@ android {
     compileSdk = 36
 
     val useMockApiOverride = providers.gradleProperty("floppy.useMockApi").orNull
-    val debugUseMockApi = useMockApiOverride ?: "true"
+    val debugUseMockApi = useMockApiOverride ?: "false"
     val releaseUseMockApi = useMockApiOverride ?: "false"
-    val apiBaseUrl = providers.gradleProperty("floppy.apiBaseUrl").orNull ?: "http://8000-fph4ha6m.agent-sandbox.baidu-int.com/"
+    val apiBaseUrl = providers.gradleProperty("floppy.apiBaseUrl").orNull ?: "http://172.22.159.11:8000/"
 
     defaultConfig {
         applicationId = "com.floppy.app"

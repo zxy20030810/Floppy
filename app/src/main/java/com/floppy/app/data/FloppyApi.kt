@@ -18,6 +18,7 @@ import retrofit2.http.POST
 import retrofit2.http.PUT
 import retrofit2.http.Part
 import retrofit2.http.Path
+import retrofit2.http.Query
 
 interface FloppyApi {
     @PUT("users/{userId}/questionnaire")
@@ -51,7 +52,10 @@ interface FloppyApi {
     suspend fun getAudio(@Path("audioId") audioId: String): AudioItem
 
     @GET("users/{userId}/audio-library")
-    suspend fun getAudioLibrary(@Path("userId") userId: String): AudioLibrary
+    suspend fun getAudioLibrary(
+        @Path("userId") userId: String,
+        @Query("limit") limit: Int = 10
+    ): AudioLibrary
 
     @Multipart
     @POST("users/{userId}/uploads")
@@ -75,11 +79,18 @@ interface FloppyApi {
         @Path("uploadId") uploadId: String
     ): UploadItem
 
-    @POST("users/{userId}/audio/history")
-    suspend fun reportAudioHistory(
+    @POST("users/{userId}/playback")
+    suspend fun startPlayback(
         @Path("userId") userId: String,
-        @Body request: HistoryReportRequest
-    ): AudioItem
+        @Body request: PlaybackStartRequest
+    ): PlaybackRecordResponse
+
+    @POST("users/{userId}/playback/{recordId}/feedback")
+    suspend fun submitPlaybackFeedback(
+        @Path("userId") userId: String,
+        @Path("recordId") recordId: String,
+        @Body request: PlaybackFeedbackRequest
+    ): FeedbackResponse
 
     @POST("v1/feedback")
     suspend fun submitFeedback(@Body feedback: Feedback): FeedbackResponse
@@ -241,13 +252,29 @@ data class FeedbackResponse(
     val message: String
 )
 
-data class HistoryReportRequest(
+data class PlaybackStartRequest(
     val audioId: String,
+    @SerializedName("asset_id")
+    val assetId: String = audioId,
     val source: String,
     val positionSeconds: Int = 0,
     val durationSeconds: Int = 0,
     val playbackProgress: Float = 0f,
-    val event: String = "play"
+    val event: String = "start"
+)
+
+data class PlaybackRecordResponse(
+    @SerializedName(value = "record_id", alternate = ["recordId"])
+    val recordId: String? = null,
+    val accepted: Boolean? = null
+)
+
+data class PlaybackFeedbackRequest(
+    val rating: Int,
+    val reason: String? = null,
+    val positionSeconds: Int = 0,
+    val durationSeconds: Int = 0,
+    val playbackProgress: Float = 0f
 )
 
 data class TextIntentRequest(
