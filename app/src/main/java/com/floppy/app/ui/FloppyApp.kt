@@ -2,6 +2,7 @@ package com.floppy.app.ui
 
 import android.Manifest
 import android.annotation.SuppressLint
+import android.app.Activity
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
@@ -35,6 +36,8 @@ import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import android.widget.ImageView
+import android.widget.Toast
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.core.LinearEasing
@@ -49,6 +52,7 @@ import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
@@ -115,7 +119,6 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.clipToBounds
-import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
@@ -150,6 +153,7 @@ import com.floppy.app.bluetooth.FloppyBluetoothDevice
 import com.floppy.app.bluetooth.FloppyBluetoothState
 import com.floppy.app.bluetooth.FloppyBluetoothStatus
 import com.floppy.app.data.FallbackAudioLibrary
+import com.floppy.app.data.LocalVoiceOptions
 import com.floppy.app.domain.AgeRange
 import com.floppy.app.domain.AgentState
 import com.floppy.app.domain.AppSettings
@@ -188,6 +192,7 @@ private enum class MainTab(val label: String) {
 }
 
 private const val SpeechLogTag = "FloppySpeech"
+private const val ExitBackWindowMillis = 2_000L
 
 private enum class ResearchStep {
     Gender,
@@ -238,15 +243,16 @@ fun FloppyApp(viewModel: FloppyViewModel) {
                 MainShell(
                 state = state,
                 snackbarHostState = snackbarHostState,
-                onStartSpeechListening = viewModel::startSpeechListening,
-                onStopSpeechListening = viewModel::stopSpeechListening,
+                    onStartSpeechListening = viewModel::startSpeechListening,
+                    onStopSpeechListening = viewModel::stopSpeechListening,
                 onStartStreamingSpeech = viewModel::startStreamingSpeech,
                 onStopStreamingSpeech = viewModel::stopStreamingSpeech,
-                onSpeechPartial = viewModel::updateSpeechPartial,
-                onSpeechComplete = viewModel::completeSpeechListening,
-                onSpeechRecordingComplete = viewModel::transcribeSpeechRecording,
-                onSpeechError = viewModel::failSpeechListening,
+                    onSpeechPartial = viewModel::updateSpeechPartial,
+                    onSpeechComplete = viewModel::completeSpeechListening,
+                    onSpeechRecordingComplete = viewModel::transcribeSpeechRecording,
+                    onSpeechError = viewModel::failSpeechListening,
                 onSpeechPermissionDenied = viewModel::denySpeechPermission,
+                onCancelSpeechListening = viewModel::cancelSpeechListening,
                 onPlay = viewModel::play,
                 onPauseOrResume = viewModel::pauseOrResume,
                 onFeedback = viewModel::submitFeedback,
@@ -267,6 +273,8 @@ fun FloppyApp(viewModel: FloppyViewModel) {
 private fun IntroVideoScreen(onFinished: () -> Unit) {
     val videoUri = rememberRawMp4Uri(R.raw.app_intro)
     var finished by remember { mutableStateOf(false) }
+    val topVideoEdge = Color(0xFF020914)
+    val bottomVideoEdge = Color(0xFF4652B4)
 
     fun finishOnce() {
         if (!finished) {
@@ -280,12 +288,13 @@ private fun IntroVideoScreen(onFinished: () -> Unit) {
             .fillMaxSize()
             .background(
                 Brush.verticalGradient(
-                    colors = listOf(
-                        Color(0xFF05070F),
-                        Color(0xFF111A3D),
-                        Color(0xFF24317E),
-                        Color(0xFF3A43A3),
-                        Color(0xFF4B54AE)
+                    colorStops = arrayOf(
+                        0.00f to topVideoEdge,
+                        0.18f to topVideoEdge,
+                        0.52f to Color(0xFF111C49),
+                        0.78f to Color(0xFF303B92),
+                        0.92f to bottomVideoEdge,
+                        1.00f to bottomVideoEdge
                     )
                 )
             ),
@@ -300,6 +309,36 @@ private fun IntroVideoScreen(onFinished: () -> Unit) {
             resizeMode = AspectRatioFrameLayout.RESIZE_MODE_FIT,
             onPlaybackEnded = { finishOnce() },
             onPlaybackError = { finishOnce() }
+        )
+        Box(
+            modifier = Modifier
+                .align(Alignment.TopCenter)
+                .fillMaxWidth()
+                .height(132.dp)
+                .background(
+                    Brush.verticalGradient(
+                        colors = listOf(
+                            topVideoEdge,
+                            topVideoEdge.copy(alpha = 0.72f),
+                            Color.Transparent
+                        )
+                    )
+                )
+        )
+        Box(
+            modifier = Modifier
+                .align(Alignment.BottomCenter)
+                .fillMaxWidth()
+                .height(168.dp)
+                .background(
+                    Brush.verticalGradient(
+                        colors = listOf(
+                            Color.Transparent,
+                            bottomVideoEdge.copy(alpha = 0.58f),
+                            bottomVideoEdge
+                        )
+                    )
+                )
         )
     }
 }
@@ -500,25 +539,39 @@ private fun AgeResearchPage(
     selected: AgeRange,
     onSelected: (AgeRange) -> Unit
 ) {
+    val ageOptions = AgeRange.entries.toList()
+    val selectedIndex = ageOptions.indexOf(selected).coerceAtLeast(0)
+    val ageListState = rememberLazyListState(
+        initialFirstVisibleItemIndex = (selectedIndex - 1).coerceAtLeast(0)
+    )
+
+    LaunchedEffect(selected) {
+        val nextIndex = ageOptions.indexOf(selected).coerceAtLeast(0)
+        ageListState.animateScrollToItem((nextIndex - 1).coerceAtLeast(0))
+    }
+
     Column(verticalArrangement = Arrangement.spacedBy(26.dp)) {
         ResearchTitle(
             title = "Hi~your gender",
             subtitle = "match more accurate content for you"
         )
-        Column(
+        LazyColumn(
+            state = ageListState,
             modifier = Modifier
                 .fillMaxWidth()
+                .height(196.dp)
                 .clip(RoundedCornerShape(12.dp))
                 .background(Color(0xFF111832).copy(alpha = 0.94f))
-                .padding(horizontal = 12.dp, vertical = 28.dp),
+                .padding(horizontal = 12.dp),
+            contentPadding = PaddingValues(vertical = 36.dp),
             verticalArrangement = Arrangement.spacedBy(6.dp)
         ) {
-            AgeRange.entries.forEach { option ->
+            items(ageOptions) { option ->
                 val isSelected = selected == option
                 Box(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .height(27.dp)
+                        .height(36.dp)
                         .clip(RoundedCornerShape(8.dp))
                         .background(if (isSelected) ResearchPurple else Color.Transparent)
                         .clickable { onSelected(option) },
@@ -776,6 +829,19 @@ private val AudioSelectedTabBrush = Brush.verticalGradient(
 )
 
 @Composable
+private fun Modifier.noRippleClickable(
+    enabled: Boolean = true,
+    onClick: () -> Unit
+): Modifier {
+    return clickable(
+        interactionSource = remember { MutableInteractionSource() },
+        indication = null,
+        enabled = enabled,
+        onClick = onClick
+    )
+}
+
+@Composable
 private fun SharedPageBackground() {
     Box(
         modifier = Modifier
@@ -795,15 +861,16 @@ private fun SharedPageBackground() {
 private fun MainShell(
     state: FloppyUiState,
     snackbarHostState: SnackbarHostState,
-    onStartSpeechListening: () -> Unit,
-    onStopSpeechListening: () -> Unit,
+    onStartSpeechListening: () -> Long,
+    onStopSpeechListening: (Long) -> Unit,
     onStartStreamingSpeech: (() -> Unit) -> Boolean,
     onStopStreamingSpeech: () -> Unit,
-    onSpeechPartial: (String) -> Unit,
-    onSpeechComplete: (String?) -> Unit,
-    onSpeechRecordingComplete: (Uri, String, String?) -> Unit,
-    onSpeechError: (String) -> Unit,
+    onSpeechPartial: (Long, String) -> Unit,
+    onSpeechComplete: (Long, String?) -> Unit,
+    onSpeechRecordingComplete: (Long, Uri, String, String?) -> Unit,
+    onSpeechError: (Long, String) -> Unit,
     onSpeechPermissionDenied: () -> Unit,
+    onCancelSpeechListening: () -> Unit,
     onPlay: (AudioItem) -> Unit,
     onPauseOrResume: () -> Unit,
     onFeedback: (Int, String?) -> Unit,
@@ -815,7 +882,45 @@ private fun MainShell(
     onRefreshVoiceOptions: () -> Unit,
     onSaveVoiceSelection: (String) -> Unit
 ) {
+    val context = LocalContext.current
     var selectedTab by remember { mutableStateOf(MainTab.Home) }
+    var previousTab by remember { mutableStateOf<MainTab?>(null) }
+    var lastExitBackTime by remember { mutableStateOf(0L) }
+
+    fun openTab(tab: MainTab) {
+        if (tab == selectedTab) return
+        previousTab = selectedTab
+        selectedTab = tab
+        lastExitBackTime = 0L
+    }
+
+    fun goBackToPreviousOrHome() {
+        val targetTab = previousTab?.takeIf { it != selectedTab } ?: MainTab.Home
+        previousTab = if (targetTab == MainTab.Home) null else MainTab.Home
+        selectedTab = targetTab
+        lastExitBackTime = 0L
+    }
+
+    fun requestExit() {
+        val now = System.currentTimeMillis()
+        if (now - lastExitBackTime <= ExitBackWindowMillis) {
+            (context as? Activity)?.finish()
+        } else {
+            lastExitBackTime = now
+            Toast.makeText(context, "连续返回两次离开陪伴", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    BackHandler {
+        when (selectedTab) {
+            MainTab.UploadLink,
+            MainTab.Home -> requestExit()
+
+            MainTab.Settings,
+            MainTab.Library,
+            MainTab.Chat -> goBackToPreviousOrHome()
+        }
+    }
 
     Scaffold(
         containerColor = Color.Black,
@@ -840,35 +945,37 @@ private fun MainShell(
                     onSpeechRecordingComplete = onSpeechRecordingComplete,
                     onSpeechError = onSpeechError,
                     onSpeechPermissionDenied = onSpeechPermissionDenied,
-                    onOpenHome = { selectedTab = MainTab.Home },
-                    onOpenUploadLink = { selectedTab = MainTab.UploadLink },
-                    onOpenLibrary = { selectedTab = MainTab.Library },
-                    onOpenChat = { selectedTab = MainTab.Chat },
-                    onOpenSettings = { selectedTab = MainTab.Settings },
+                    onCancelSpeechListening = onCancelSpeechListening,
+                    onOpenHome = { openTab(MainTab.Home) },
+                    onOpenUploadLink = { openTab(MainTab.UploadLink) },
+                    onOpenLibrary = { openTab(MainTab.Library) },
+                    onOpenChat = { openTab(MainTab.Chat) },
+                    onOpenSettings = { openTab(MainTab.Settings) },
                     onPauseOrResume = onPauseOrResume
                 )
 
                 MainTab.UploadLink -> LinkUploadScreen(
-                    onOpenHome = { selectedTab = MainTab.Home },
-                    onOpenSettings = { selectedTab = MainTab.Settings },
-                    onOpenLibrary = { selectedTab = MainTab.Library },
-                    onOpenChat = { selectedTab = MainTab.Chat }
+                    onOpenHome = { openTab(MainTab.Home) },
+                    onOpenSettings = { openTab(MainTab.Settings) },
+                    onOpenLibrary = { openTab(MainTab.Library) },
+                    onOpenChat = { openTab(MainTab.Chat) }
                 )
 
                 MainTab.Library -> AudioLibraryScreen(
                     state = state,
-                    onBack = { selectedTab = MainTab.Home },
+                    onBack = ::goBackToPreviousOrHome,
                     onStartUpload = onStartUpload,
                     onRetryUpload = onRetryUpload,
                     onCompleteUpload = onCompleteUpload,
-                    onPlay = onPlay
+                    onPlay = onPlay,
+                    onPauseOrResume = onPauseOrResume
                 )
 
                 MainTab.Chat -> ChatScreen(
                     messages = state.chatMessages,
                     playback = state.playback,
                     isSending = state.isSubmittingTextIntent,
-                    onBack = { selectedTab = MainTab.Home },
+                    onBack = ::goBackToPreviousOrHome,
                     onSendMessage = onSubmitChatMessage,
                     onPlayAudio = onPlay,
                     onPauseOrResume = onPauseOrResume
@@ -880,7 +987,7 @@ private fun MainShell(
                     isLoadingVoiceOptions = state.isLoadingVoiceOptions,
                     isSavingVoiceSelection = state.isSavingVoiceSelection,
                     selectedVoiceId = state.selectedVoiceId,
-                    onBack = { selectedTab = MainTab.Home },
+                    onBack = ::goBackToPreviousOrHome,
                     onUpdateSettings = onUpdateSettings,
                     onRefreshVoiceOptions = onRefreshVoiceOptions,
                     onSaveVoiceSelection = onSaveVoiceSelection
@@ -1368,15 +1475,16 @@ private fun SendGlyph() {
 @Composable
 private fun HomeScreen(
     state: FloppyUiState,
-    onStartSpeechListening: () -> Unit,
-    onStopSpeechListening: () -> Unit,
+    onStartSpeechListening: () -> Long,
+    onStopSpeechListening: (Long) -> Unit,
     onStartStreamingSpeech: (() -> Unit) -> Boolean,
     onStopStreamingSpeech: () -> Unit,
-    onSpeechPartial: (String) -> Unit,
-    onSpeechComplete: (String?) -> Unit,
-    onSpeechRecordingComplete: (Uri, String, String?) -> Unit,
-    onSpeechError: (String) -> Unit,
+    onSpeechPartial: (Long, String) -> Unit,
+    onSpeechComplete: (Long, String?) -> Unit,
+    onSpeechRecordingComplete: (Long, Uri, String, String?) -> Unit,
+    onSpeechError: (Long, String) -> Unit,
     onSpeechPermissionDenied: () -> Unit,
+    onCancelSpeechListening: () -> Unit,
     onOpenHome: () -> Unit,
     onOpenUploadLink: () -> Unit,
     onOpenLibrary: () -> Unit,
@@ -1408,7 +1516,8 @@ private fun HomeScreen(
         onFinalResult = onSpeechComplete,
         onRecordingResult = onSpeechRecordingComplete,
         onError = onSpeechError,
-        onPermissionDenied = onSpeechPermissionDenied
+        onPermissionDenied = onSpeechPermissionDenied,
+        onCancelListening = onCancelSpeechListening
     )
     ShakeToListenEffect(
         onShake = speechInputController.startListening
@@ -1505,15 +1614,16 @@ private fun ShakeToListenEffect(
 @Composable
 private fun rememberSpeechInputController(
     isListening: Boolean,
-    onStartListening: () -> Unit,
-    onStopListening: () -> Unit,
+    onStartListening: () -> Long,
+    onStopListening: (Long) -> Unit,
     onStartStreaming: (() -> Unit) -> Boolean,
     onStopStreaming: () -> Unit,
-    onPartialResult: (String) -> Unit,
-    onFinalResult: (String?) -> Unit,
-    onRecordingResult: (Uri, String, String?) -> Unit,
-    onError: (String) -> Unit,
-    onPermissionDenied: () -> Unit
+    onPartialResult: (Long, String) -> Unit,
+    onFinalResult: (Long, String?) -> Unit,
+    onRecordingResult: (Long, Uri, String, String?) -> Unit,
+    onError: (Long, String) -> Unit,
+    onPermissionDenied: () -> Unit,
+    onCancelListening: () -> Unit
 ): SpeechInputController {
     val context = LocalContext.current
     var speechRecognizer by remember { mutableStateOf<SpeechRecognizer?>(null) }
@@ -1523,6 +1633,7 @@ private fun rememberSpeechInputController(
     var recordingFile by remember { mutableStateOf<File?>(null) }
     var isBackendRecording by remember { mutableStateOf(false) }
     var isStreamingSpeech by remember { mutableStateOf(false) }
+    var activeSpeechSessionId by remember { mutableStateOf<Long?>(null) }
     var backendRecordingStartedAt by remember { mutableStateOf(0L) }
     var recognitionStartedAt by remember { mutableStateOf(0L) }
     var recognitionSessionId by remember { mutableIntStateOf(0) }
@@ -1537,6 +1648,7 @@ private fun rememberSpeechInputController(
     val latestOnRecordingResult by rememberUpdatedState(onRecordingResult)
     val latestOnError by rememberUpdatedState(onError)
     val latestOnPermissionDenied by rememberUpdatedState(onPermissionDenied)
+    val latestOnCancelListening by rememberUpdatedState(onCancelListening)
 
     LaunchedEffect(isListening) {
         if (!isListening && isStreamingSpeech) {
@@ -1570,9 +1682,23 @@ private fun rememberSpeechInputController(
         isBackendRecording = false
     }
 
+    fun requireSpeechSession(): Long {
+        return activeSpeechSessionId ?: latestOnStartListening().also { sessionId ->
+            activeSpeechSessionId = sessionId
+        }
+    }
+
+    fun clearSpeechSession(sessionId: Long) {
+        if (activeSpeechSessionId == sessionId) {
+            activeSpeechSessionId = null
+        }
+    }
+
     fun startBackendRecording() {
         releaseRecognizer()
         cancelBackendRecording()
+        val sessionId = latestOnStartListening()
+        activeSpeechSessionId = sessionId
         val outputFile = createSpeechRecordingFile()
         val nextRecorder = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
             MediaRecorder(context)
@@ -1595,16 +1721,17 @@ private fun rememberSpeechInputController(
             isBackendRecording = true
             backendRecordingStartedAt = android.os.SystemClock.elapsedRealtime()
             Log.d(SpeechLogTag, "Started backend speech recording: ${outputFile.name}")
-            latestOnStartListening()
         }.onFailure { error ->
+            clearSpeechSession(sessionId)
             nextRecorder.release()
             Log.d(SpeechLogTag, "Backend speech recording failed", error)
-            latestOnError("录音启动失败，请再试一次")
+            latestOnError(sessionId, "录音启动失败，请再试一次")
         }
     }
 
     fun stopBackendRecording() {
         val activeRecorder = recorder ?: return
+        val sessionId = activeSpeechSessionId ?: return
         val activeFile = recordingFile
         val elapsedSinceStart = android.os.SystemClock.elapsedRealtime() - backendRecordingStartedAt
         if (elapsedSinceStart < 700L) {
@@ -1618,14 +1745,15 @@ private fun rememberSpeechInputController(
             activeRecorder.stop()
         }
         activeRecorder.release()
-        latestOnStopListening()
+        latestOnStopListening(sessionId)
         if (activeFile == null || stopped.isFailure || activeFile.length() <= 0L) {
             Log.d(SpeechLogTag, "Backend speech recording produced no audio", stopped.exceptionOrNull())
-            latestOnFinalResult(null)
+            latestOnFinalResult(sessionId, null)
+            clearSpeechSession(sessionId)
             return
         }
         Log.d(SpeechLogTag, "Completed backend speech recording: ${activeFile.name}, ${activeFile.length()} bytes")
-        latestOnRecordingResult(Uri.fromFile(activeFile), activeFile.name, "audio/mp4")
+        latestOnRecordingResult(sessionId, Uri.fromFile(activeFile), activeFile.name, "audio/mp4")
     }
 
     fun startStreamingOrFallback() {
@@ -1673,7 +1801,7 @@ private fun rememberSpeechInputController(
             override fun onBeginningOfSpeech() {
                 recognitionCallbackSeen = true
                 Log.d(SpeechLogTag, "Beginning of speech")
-                latestOnStartListening()
+                requireSpeechSession()
             }
 
             override fun onRmsChanged(rmsdB: Float) = Unit
@@ -1683,7 +1811,7 @@ private fun rememberSpeechInputController(
             override fun onEndOfSpeech() {
                 recognitionCallbackSeen = true
                 Log.d(SpeechLogTag, "End of speech")
-                latestOnStopListening()
+                activeSpeechSessionId?.let(latestOnStopListening)
             }
 
             override fun onError(error: Int) {
@@ -1693,13 +1821,22 @@ private fun rememberSpeechInputController(
                 releaseRecognizer(cancelRecognition = false)
                 when (error) {
                     SpeechRecognizer.ERROR_NO_MATCH,
-                    SpeechRecognizer.ERROR_SPEECH_TIMEOUT -> latestOnFinalResult(fallbackTranscript)
+                    SpeechRecognizer.ERROR_SPEECH_TIMEOUT -> activeSpeechSessionId?.let { sessionId ->
+                        latestOnFinalResult(sessionId, fallbackTranscript)
+                        clearSpeechSession(sessionId)
+                    }
                     SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS -> latestOnPermissionDenied()
                     SpeechRecognizer.ERROR_RECOGNIZER_BUSY -> {
-                        latestOnStopListening()
-                        latestOnError("语音识别刚刚停下，请再点一次")
+                        activeSpeechSessionId?.let { sessionId ->
+                            latestOnStopListening(sessionId)
+                            latestOnError(sessionId, "语音识别刚刚停下，请再点一次")
+                            clearSpeechSession(sessionId)
+                        }
                     }
-                    else -> latestOnError(speechErrorMessage(error))
+                    else -> activeSpeechSessionId?.let { sessionId ->
+                        latestOnError(sessionId, speechErrorMessage(error))
+                        clearSpeechSession(sessionId)
+                    }
                 }
             }
 
@@ -1708,20 +1845,26 @@ private fun rememberSpeechInputController(
                 recognitionCallbackSeen = true
                 Log.d(SpeechLogTag, "Final result: ${transcript.orEmpty()}")
                 releaseRecognizer(cancelRecognition = false)
-                latestOnFinalResult(transcript)
+                activeSpeechSessionId?.let { sessionId ->
+                    latestOnFinalResult(sessionId, transcript)
+                    clearSpeechSession(sessionId)
+                }
             }
 
             override fun onPartialResults(partialResults: Bundle?) {
                 val transcript = partialResults.bestSpeechText()
                 recognitionCallbackSeen = true
                 Log.d(SpeechLogTag, "Partial result: ${transcript.orEmpty()}")
-                transcript?.let(latestOnPartialResult)
+                val sessionId = activeSpeechSessionId
+                if (sessionId != null && transcript != null) {
+                    latestOnPartialResult(sessionId, transcript)
+                }
             }
 
             override fun onEvent(eventType: Int, params: Bundle?) = Unit
         })
 
-        latestOnStartListening()
+        activeSpeechSessionId = latestOnStartListening()
         runCatching {
             recognizer.startListening(speechRecognizerIntent())
         }.onSuccess {
@@ -1736,7 +1879,10 @@ private fun rememberSpeechInputController(
         }.onFailure { error ->
             Log.d(SpeechLogTag, "startListening call failed", error)
             releaseRecognizer(cancelRecognition = false)
-            latestOnError("语音识别启动失败，请再点一次 Floppy")
+            activeSpeechSessionId?.let { sessionId ->
+                latestOnError(sessionId, "语音识别启动失败，请再点一次 Floppy")
+                clearSpeechSession(sessionId)
+            }
         }
     }
 
@@ -1753,6 +1899,7 @@ private fun rememberSpeechInputController(
         }
         val recognizer = speechRecognizer
         if (recognizer != null) {
+            val sessionId = activeSpeechSessionId ?: return
             val elapsedSinceStart = android.os.SystemClock.elapsedRealtime() - recognitionStartedAt
             if (elapsedSinceStart < 1200L) {
                 Log.d(SpeechLogTag, "Ignoring stop request; recognition just started ${elapsedSinceStart}ms ago")
@@ -1760,8 +1907,9 @@ private fun rememberSpeechInputController(
             }
             Log.d(SpeechLogTag, "Stopping speech recognition and waiting for final result")
             recognizer.stopListening()
+            latestOnStopListening(sessionId)
+            return
         }
-        latestOnStopListening()
     }
 
     fun playIntroThenStartRecognition() {
@@ -1811,7 +1959,9 @@ private fun rememberSpeechInputController(
                 latestOnStopStreaming()
                 isStreamingSpeech = false
             }
+            activeSpeechSessionId = null
             cancelBackendRecording()
+            latestOnCancelListening()
         }
     }
 
@@ -1952,7 +2102,7 @@ private fun FloppyCloudButton(
     Box(
         modifier = modifier
             .size(36.dp)
-            .clickable(onClick = onClick),
+            .noRippleClickable(onClick = onClick),
         contentAlignment = Alignment.Center
     ) {
         OptionalDrawable(
@@ -2002,16 +2152,14 @@ private fun HomeCenterStage(
         contentAlignment = Alignment.Center
     ) {
         val clampedDogWidth = maxWidth
-        val dogImageScale = when {
-            isDogListening && maxHeight < 430.dp -> 1.08f
-            isDogListening -> 1.10f
-            maxHeight < 430.dp -> 1.12f
-            else -> 1.16f
-        }
+        val dogAspectRatio = 3f / 4f
+        val dogForegroundWidthFraction = 1f
+        val dogImageModifier = Modifier
+            .align(Alignment.BottomCenter)
+            .fillMaxWidth(dogForegroundWidthFraction)
+            .aspectRatio(dogAspectRatio)
+            .offset(y = (-32).dp)
         val context = LocalContext.current
-        var showTouchHint by rememberSaveable {
-            mutableStateOf(!context.getSharedPreferences("floppy_prefs", Context.MODE_PRIVATE).getBoolean("hint_dismissed", false))
-        }
         var showPlaybackHint by rememberSaveable {
             mutableStateOf(!context.getSharedPreferences("floppy_prefs", Context.MODE_PRIVATE).getBoolean("playback_hint_dismissed", false))
         }
@@ -2046,10 +2194,6 @@ private fun HomeCenterStage(
                 dogInteractionLockTarget = null
             }
         }
-        val dismissTouchHint = {
-            context.getSharedPreferences("floppy_prefs", Context.MODE_PRIVATE).edit().putBoolean("hint_dismissed", true).apply()
-            showTouchHint = false
-        }
         val dismissPlaybackHint = {
             context.getSharedPreferences("floppy_prefs", Context.MODE_PRIVATE).edit().putBoolean("playback_hint_dismissed", true).apply()
             showPlaybackHint = false
@@ -2069,17 +2213,10 @@ private fun HomeCenterStage(
                 .fillMaxHeight()
                 .clipToBounds()
                 .align(Alignment.BottomCenter)
-                .clickable(onClick = toggleConversation)
+                .noRippleClickable(onClick = toggleConversation)
         ) {
-            val dogImageModifier = Modifier
-                .fillMaxSize()
-                .graphicsLayer {
-                    scaleX = dogImageScale
-                    scaleY = dogImageScale
-                    transformOrigin = TransformOrigin(0.5f, 1f)
-                }
             if (isDogTransitioning) {
-                GifImage(
+                HomeDogGifStage(
                     resId = R.drawable.home_floppy_state_transition,
                     contentDescription = "Floppy changing state",
                     loop = false,
@@ -2091,24 +2228,21 @@ private fun HomeCenterStage(
                             dogInteractionLockTarget = null
                         }
                     },
-                    modifier = dogImageModifier,
-                    scaleType = ImageView.ScaleType.CENTER_CROP
+                    foregroundModifier = dogImageModifier
                 )
             } else if (renderedDogListening) {
-                GifImage(
+                HomeDogGifStage(
                     resId = R.drawable.home_floppy_listening_call,
                     contentDescription = "Floppy listening",
                     loop = true,
-                    modifier = dogImageModifier,
-                    scaleType = ImageView.ScaleType.CENTER_CROP
+                    foregroundModifier = dogImageModifier
                 )
             } else {
-                GifImage(
+                HomeDogGifStage(
                     resId = R.drawable.home_floppy_idle,
                     contentDescription = "Floppy quiet",
                     loop = true,
-                    modifier = dogImageModifier,
-                    scaleType = ImageView.ScaleType.CENTER_CROP
+                    foregroundModifier = dogImageModifier
                 )
             }
             Box(
@@ -2181,35 +2315,11 @@ private fun HomeCenterStage(
                     modifier = Modifier
                         .width(clampedDogWidth * 0.27f)
                         .align(Alignment.TopStart)
-                        .offset(x = clampedDogWidth * 0.12f, y = clampedDogWidth * 0.07f)
+                        .offset(x = clampedDogWidth * 0.12f, y = clampedDogWidth * 0.19f)
                 )
             }
         }
 
-        if (!isSignalAnimating && !hasPlaybackAudio && showTouchHint) {
-            val offsetAnim = remember { Animatable(0f) }
-            LaunchedEffect(Unit) {
-                repeat(3) {
-                    offsetAnim.animateTo(6f, tween(200))
-                    offsetAnim.animateTo(-6f, tween(200))
-                }
-                offsetAnim.animateTo(0f, tween(150))
-            }
-            FingerHint(
-                modifier = Modifier
-                    .width(clampedDogWidth * 0.42f)
-                    .align(Alignment.Center)
-                    .offset(x = clampedDogWidth * 0.18f, y = clampedDogWidth * 0.14f)
-                    .graphicsLayer { translationX = offsetAnim.value }
-                    .clickable(indication = null, interactionSource = remember { androidx.compose.foundation.interaction.MutableInteractionSource() }) { dismissTouchHint() }
-            )
-            TouchStartHintText(
-                modifier = Modifier
-                    .align(Alignment.Center)
-                    .offset(x = -clampedDogWidth * 0.15f, y = clampedDogWidth * 0.34f)
-                    .clickable(indication = null, interactionSource = remember { androidx.compose.foundation.interaction.MutableInteractionSource() }) { dismissTouchHint() }
-            )
-        }
         if (hasPlaybackAudio && showPlaybackBubble && showPlaybackHint) {
             val offsetAnim = remember { Animatable(0f) }
             LaunchedEffect(Unit) {
@@ -2222,11 +2332,59 @@ private fun HomeCenterStage(
             PlaybackToggleHintText(
                 modifier = Modifier
                     .align(Alignment.TopStart)
-                    .offset(x = clampedDogWidth * 0.42f, y = clampedDogWidth * 0.08f)
+                    .offset(x = clampedDogWidth * 0.42f, y = clampedDogWidth * 0.20f)
                     .graphicsLayer { translationX = offsetAnim.value }
-                    .clickable(indication = null, interactionSource = remember { androidx.compose.foundation.interaction.MutableInteractionSource() }) { dismissPlaybackHint() }
+                    .noRippleClickable { dismissPlaybackHint() }
             )
         }
+    }
+}
+
+@Composable
+private fun HomeDogGifStage(
+    resId: Int,
+    contentDescription: String?,
+    loop: Boolean,
+    onAnimationEnd: (() -> Unit)? = null,
+    foregroundModifier: Modifier = Modifier
+) {
+    Box(modifier = Modifier.fillMaxSize()) {
+        Box(
+            modifier = Modifier
+                .matchParentSize()
+                .background(
+                    Brush.verticalGradient(
+                        colors = listOf(
+                            Color(0xFF020713),
+                            Color(0xFF050C18),
+                            Color(0xFF0B1428),
+                            Color(0xFF1A2552),
+                            Color(0xFF5862D2)
+                        )
+                    )
+                )
+        )
+        Box(
+            modifier = Modifier
+                .matchParentSize()
+                .background(
+                    Brush.horizontalGradient(
+                        colors = listOf(
+                            Color.Black.copy(alpha = 0.18f),
+                            Color.Transparent,
+                            Color.Black.copy(alpha = 0.18f)
+                        )
+                    )
+                )
+        )
+        GifImage(
+            resId = resId,
+            contentDescription = contentDescription,
+            loop = loop,
+            onAnimationEnd = onAnimationEnd,
+            modifier = foregroundModifier,
+            scaleType = ImageView.ScaleType.FIT_CENTER
+        )
     }
 }
 
@@ -2311,14 +2469,6 @@ private fun ImageView.startGifDrawable(
             postDelayed({ onAnimationEnd?.invoke() }, 900L)
         }
     }
-}
-
-@Composable
-private fun TouchStartHintText(modifier: Modifier = Modifier) {
-    HomeHintText(
-        text = "请触摸我开始交流",
-        modifier = modifier
-    )
 }
 
 @Composable
@@ -2556,7 +2706,7 @@ private fun PlayingBubble(
     modifier: Modifier = Modifier
 ) {
     Column(
-        modifier = modifier.clickable(onClick = onClick),
+        modifier = modifier.noRippleClickable(onClick = onClick),
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
         Box(
@@ -2598,67 +2748,6 @@ private fun ArtworkPreview(
         modifier = modifier,
         contentScale = ContentScale.Crop
     )
-}
-
-
-@Composable
-private fun FingerHint(modifier: Modifier = Modifier) {
-    OptionalDrawable(
-        name = "home_tap_hand",
-        contentDescription = "Tap hint",
-        modifier = modifier.aspectRatio(0.95f),
-        contentScale = ContentScale.Fit
-    ) {
-        Canvas(modifier = Modifier.fillMaxSize()) {
-            drawRoundRect(
-                brush = Brush.linearGradient(
-                    colors = listOf(Color(0xFF81F3FF), Color(0xFF39BFE1)),
-                    start = Offset(size.width * 0.55f, size.height * 0.68f),
-                    end = Offset(size.width, size.height)
-                ),
-                topLeft = Offset(size.width * 0.58f, size.height * 0.64f),
-                size = Size(size.width * 0.33f, size.height * 0.28f),
-                cornerRadius = androidx.compose.ui.geometry.CornerRadius(size.width * 0.08f, size.width * 0.08f)
-            )
-            drawRoundRect(
-                color = Color(0xFF67DCEC),
-                topLeft = Offset(size.width * 0.61f, size.height * 0.66f),
-                size = Size(size.width * 0.28f, size.height * 0.06f),
-                cornerRadius = androidx.compose.ui.geometry.CornerRadius(size.width * 0.04f, size.width * 0.04f)
-            )
-            drawRoundRect(
-                brush = Brush.linearGradient(
-                    colors = listOf(Color(0xFFFFD2D4), Color(0xFFFFF0EC), Color(0xFFF3A5A8)),
-                    start = Offset(size.width * 0.35f, size.height * 0.02f),
-                    end = Offset(size.width * 0.70f, size.height * 0.58f)
-                ),
-                topLeft = Offset(size.width * 0.40f, size.height * 0.07f),
-                size = Size(size.width * 0.15f, size.height * 0.54f),
-                cornerRadius = androidx.compose.ui.geometry.CornerRadius(size.width * 0.075f, size.width * 0.075f)
-            )
-            drawRoundRect(
-                brush = Brush.linearGradient(
-                    colors = listOf(Color(0xFFFFD6D7), Color(0xFFF5ABAE)),
-                    start = Offset(size.width * 0.26f, size.height * 0.38f),
-                    end = Offset(size.width * 0.67f, size.height * 0.69f)
-                ),
-                topLeft = Offset(size.width * 0.32f, size.height * 0.42f),
-                size = Size(size.width * 0.30f, size.height * 0.28f),
-                cornerRadius = androidx.compose.ui.geometry.CornerRadius(size.width * 0.13f, size.width * 0.13f)
-            )
-            drawRoundRect(
-                color = Color(0xFFFFC6C9),
-                topLeft = Offset(size.width * 0.24f, size.height * 0.46f),
-                size = Size(size.width * 0.15f, size.height * 0.18f),
-                cornerRadius = androidx.compose.ui.geometry.CornerRadius(size.width * 0.07f, size.width * 0.07f)
-            )
-            drawCircle(
-                color = Color(0xFFFF5B63),
-                radius = size.width * 0.025f,
-                center = Offset(size.width * 0.46f, size.height * 0.47f)
-            )
-        }
-    }
 }
 
 @Composable
@@ -3020,7 +3109,7 @@ private fun HomeModePill(
                     SolidColor(Color(0xFF8279FF).copy(alpha = 0.06f))
                 }
             )
-            .clickable(onClick = onClick)
+            .noRippleClickable(onClick = onClick)
             .padding(horizontal = 4.dp),
         horizontalArrangement = Arrangement.Center,
         verticalAlignment = Alignment.CenterVertically
@@ -3274,6 +3363,22 @@ private fun LinkUploadScreen(
     var selectedUploadName by rememberSaveable { mutableStateOf<String?>(null) }
     var selectedUploadPath by rememberSaveable { mutableStateOf<String?>(null) }
 
+    fun resetUpload() {
+        uploadState = LinkUploadState.Waiting
+        selectedUploadName = null
+        selectedUploadPath = null
+    }
+
+    BackHandler(enabled = uploadState != LinkUploadState.Waiting) {
+        when (uploadState) {
+            LinkUploadState.Pasting -> uploadState = LinkUploadState.Waiting
+            LinkUploadState.Identifying,
+            LinkUploadState.Ready,
+            LinkUploadState.Playing -> resetUpload()
+            LinkUploadState.Waiting -> Unit
+        }
+    }
+
     LaunchedEffect(uploadState) {
         when (uploadState) {
             LinkUploadState.Identifying -> {
@@ -3333,9 +3438,7 @@ private fun LinkUploadScreen(
                         }
                     },
                     onCloseVideo = {
-                        uploadState = LinkUploadState.Waiting
-                        selectedUploadName = null
-                        selectedUploadPath = null
+                        resetUpload()
                     },
                     modifier = Modifier
                         .fillMaxWidth()
@@ -4424,7 +4527,8 @@ private fun AudioLibraryScreen(
     onStartUpload: (Uri, String, String, String?) -> Unit,
     onRetryUpload: (String) -> Unit,
     onCompleteUpload: (String) -> Unit,
-    onPlay: (AudioItem) -> Unit
+    onPlay: (AudioItem) -> Unit,
+    onPauseOrResume: () -> Unit
 ) {
     val context = LocalContext.current
     var selectedTab by remember { mutableStateOf(AudioLibraryTab.Library) }
@@ -4469,7 +4573,9 @@ private fun AudioLibraryScreen(
                     AudioLibraryTab.Library -> AudioLibraryContent(
                         library = mockLibrary,
                         activeAudio = state.activeAudio,
-                        onPlay = onPlay
+                        playback = state.playback,
+                        onPlay = onPlay,
+                        onPauseOrResume = onPauseOrResume
                     )
 
                     AudioLibraryTab.Uploads -> UploadsContent(
@@ -4477,12 +4583,16 @@ private fun AudioLibraryScreen(
                         onStartUpload = openUploadPicker,
                         onRetryUpload = onRetryUpload,
                         onCompleteUpload = onCompleteUpload,
-                        onPlay = onPlay
+                        onPlay = onPlay,
+                        playback = state.playback,
+                        onPauseOrResume = onPauseOrResume
                     )
 
                     AudioLibraryTab.History -> HistoryContent(
                         history = mockLibrary.history,
-                        onPlay = onPlay
+                        playback = state.playback,
+                        onPlay = onPlay,
+                        onPauseOrResume = onPauseOrResume
                     )
                 }
             }
@@ -4575,7 +4685,9 @@ private fun AudioLibraryTabs(
 private fun AudioLibraryContent(
     library: AudioLibrary,
     activeAudio: AudioItem?,
-    onPlay: (AudioItem) -> Unit
+    playback: PlaybackUiState,
+    onPlay: (AudioItem) -> Unit,
+    onPauseOrResume: () -> Unit
 ) {
     val grouped = library.recommended
         .filter { it.isPlayableAudio() }
@@ -4598,7 +4710,9 @@ private fun AudioLibraryContent(
                     title = category,
                     audios = items,
                     activeAudio = activeAudio,
-                    onPlay = onPlay
+                    playback = playback,
+                    onPlay = onPlay,
+                    onPauseOrResume = onPauseOrResume
                 )
             }
         }
@@ -4610,7 +4724,9 @@ private fun AudioShelf(
     title: String,
     audios: List<AudioItem>,
     activeAudio: AudioItem?,
-    onPlay: (AudioItem) -> Unit
+    playback: PlaybackUiState,
+    onPlay: (AudioItem) -> Unit,
+    onPauseOrResume: () -> Unit
 ) {
     Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
         Text(
@@ -4621,10 +4737,20 @@ private fun AudioShelf(
         )
         LazyRow(horizontalArrangement = Arrangement.spacedBy(14.dp)) {
             items(audios) { audio ->
+                val isCurrent = playback.currentAudio?.id == audio.id
+                val isPlaying = isCurrent &&
+                    playback.state in setOf(PlaybackState.Playing, PlaybackState.Buffering)
                 AudioCoverCard(
                     audio = audio,
                     isActive = activeAudio?.id == audio.id,
-                    onPlay = { onPlay(audio) }
+                    isPlaying = isPlaying,
+                    onClick = {
+                        if (isCurrent) {
+                            onPauseOrResume()
+                        } else {
+                            onPlay(audio)
+                        }
+                    }
                 )
             }
         }
@@ -4635,7 +4761,8 @@ private fun AudioShelf(
 private fun AudioCoverCard(
     audio: AudioItem,
     isActive: Boolean,
-    onPlay: () -> Unit
+    isPlaying: Boolean,
+    onClick: () -> Unit
 ) {
     Box(
         modifier = Modifier
@@ -4647,7 +4774,7 @@ private fun AudioCoverCard(
                 shape = RoundedCornerShape(7.dp)
             )
             .background(audio.artworkBrush())
-            .clickable(onClick = onPlay)
+            .clickable(onClick = onClick)
     ) {
         OptionalDrawable(
             name = audio.coverDrawableName(),
@@ -4689,6 +4816,7 @@ private fun AudioCoverCard(
                 .padding(top = 7.dp)
         )
         PlayCircle(
+            isPlaying = isPlaying,
             modifier = Modifier
                 .align(Alignment.Center)
                 .padding(bottom = 8.dp)
@@ -4723,7 +4851,9 @@ private fun UploadsContent(
     onStartUpload: () -> Unit,
     onRetryUpload: (String) -> Unit,
     onCompleteUpload: (String) -> Unit,
-    onPlay: (AudioItem) -> Unit
+    onPlay: (AudioItem) -> Unit,
+    playback: PlaybackUiState,
+    onPauseOrResume: () -> Unit
 ) {
     var dismissedHeroUploadIds by remember { mutableStateOf(emptySet<String>()) }
     val activeUpload = uploads.firstOrNull { upload ->
@@ -4755,9 +4885,20 @@ private fun UploadsContent(
             )
         }
         items(uploads) { upload ->
+            val audio = upload.generatedAudio
+            val isCurrent = audio != null && playback.currentAudio?.id == audio.id
+            val isPlaying = isCurrent &&
+                playback.state in setOf(PlaybackState.Playing, PlaybackState.Buffering)
             UploadListRow(
                 upload = upload,
-                onClick = { upload.generatedAudio?.let(onPlay) }
+                isPlaying = isPlaying,
+                onClick = {
+                    when {
+                        audio == null -> Unit
+                        isCurrent -> onPauseOrResume()
+                        else -> onPlay(audio)
+                    }
+                }
             )
         }
     }
@@ -4948,7 +5089,11 @@ private fun UploadProgressRow(
 }
 
 @Composable
-private fun UploadListRow(upload: UploadItem, onClick: () -> Unit) {
+private fun UploadListRow(
+    upload: UploadItem,
+    isPlaying: Boolean,
+    onClick: () -> Unit
+) {
     val isPlayable = upload.generatedAudio != null
     Row(
         modifier = Modifier
@@ -4983,16 +5128,28 @@ private fun UploadListRow(upload: UploadItem, onClick: () -> Unit) {
                 }
             }
         }
-        Text(
-            text = if (isPlayable) "›" else "待处理",
-            color = Color.White.copy(alpha = if (isPlayable) 0.48f else 0.34f),
-            fontSize = if (isPlayable) 26.sp else 12.sp
-        )
+        if (isPlayable) {
+            PlayCircle(
+                isPlaying = isPlaying,
+                modifier = Modifier.size(34.dp)
+            )
+        } else {
+            Text(
+                text = "待处理",
+                color = Color.White.copy(alpha = 0.34f),
+                fontSize = 12.sp
+            )
+        }
     }
 }
 
 @Composable
-private fun HistoryContent(history: List<AudioItem>, onPlay: (AudioItem) -> Unit) {
+private fun HistoryContent(
+    history: List<AudioItem>,
+    playback: PlaybackUiState,
+    onPlay: (AudioItem) -> Unit,
+    onPauseOrResume: () -> Unit
+) {
     var filter by remember { mutableStateOf(HistoryFilter.All) }
     val filtered = history.distinctBy { it.id }.filter { audio ->
         when (filter) {
@@ -5033,7 +5190,23 @@ private fun HistoryContent(history: List<AudioItem>, onPlay: (AudioItem) -> Unit
             }
         } else {
             items(filtered) { audio ->
-                HistoryRow(audio = audio, onPlay = { if (audio.isPlayableAudio()) onPlay(audio) })
+                val isCurrent = playback.currentAudio?.id == audio.id
+                val isPlaying = isCurrent &&
+                    playback.state in setOf(PlaybackState.Playing, PlaybackState.Buffering)
+                HistoryRow(
+                    audio = audio,
+                    isPlaying = isPlaying,
+                    onClick = {
+                        if (!audio.isPlayableAudio()) {
+                            return@HistoryRow
+                        }
+                        if (isCurrent) {
+                            onPauseOrResume()
+                        } else {
+                            onPlay(audio)
+                        }
+                    }
+                )
             }
         }
     }
@@ -5093,7 +5266,11 @@ private fun HistoryFilterChip(
 }
 
 @Composable
-private fun HistoryRow(audio: AudioItem, onPlay: () -> Unit) {
+private fun HistoryRow(
+    audio: AudioItem,
+    isPlaying: Boolean,
+    onClick: () -> Unit
+) {
     val isPlayable = audio.isPlayableAudio()
     Row(
         modifier = Modifier
@@ -5102,7 +5279,7 @@ private fun HistoryRow(audio: AudioItem, onPlay: () -> Unit) {
             .clip(RoundedCornerShape(20.dp))
             .border(1.dp, Color.White.copy(alpha = 0.10f), RoundedCornerShape(20.dp))
             .background(Color(0xFF131C37))
-            .clickable(enabled = isPlayable, onClick = onPlay)
+            .clickable(enabled = isPlayable, onClick = onClick)
             .padding(16.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
@@ -5120,7 +5297,7 @@ private fun HistoryRow(audio: AudioItem, onPlay: () -> Unit) {
                 contentScale = ContentScale.Crop
             ) {}
             if (isPlayable) {
-                PlayCircle()
+                PlayCircle(isPlaying = isPlaying)
             } else {
                 Text("…", color = Color.White.copy(alpha = 0.62f), fontSize = 24.sp, fontWeight = FontWeight.Bold)
             }
@@ -5183,7 +5360,10 @@ private fun FloppyMiniButton(
 }
 
 @Composable
-private fun PlayCircle(modifier: Modifier = Modifier) {
+private fun PlayCircle(
+    modifier: Modifier = Modifier,
+    isPlaying: Boolean = false
+) {
     Box(
         modifier = modifier
             .size(34.dp)
@@ -5192,14 +5372,10 @@ private fun PlayCircle(modifier: Modifier = Modifier) {
             .border(1.dp, Color.White.copy(alpha = 0.55f), CircleShape),
         contentAlignment = Alignment.Center
     ) {
-        Canvas(modifier = Modifier.size(12.dp)) {
-            val path = Path().apply {
-                moveTo(size.width * 0.25f, size.height * 0.12f)
-                lineTo(size.width * 0.25f, size.height * 0.88f)
-                lineTo(size.width * 0.88f, size.height * 0.50f)
-                close()
-            }
-            drawPath(path, color = Color.White)
+        if (isPlaying) {
+            VoicePauseGlyph()
+        } else {
+            VoicePlayGlyph()
         }
     }
 }
@@ -5460,6 +5636,37 @@ private fun SettingsScreen(
         }
     }
 
+    fun closeActiveOverlay(): Boolean {
+        return when {
+            renameOpen -> {
+                renameOpen = false
+                true
+            }
+
+            voicePickerOpen -> {
+                stopVoicePreview()
+                voicePickerOpen = false
+                true
+            }
+
+            companionPickerOpen -> {
+                companionPickerOpen = false
+                true
+            }
+
+            devicePickerOpen -> {
+                devicePickerOpen = false
+                true
+            }
+
+            else -> false
+        }
+    }
+
+    BackHandler(enabled = renameOpen || voicePickerOpen || companionPickerOpen || devicePickerOpen) {
+        closeActiveOverlay()
+    }
+
     LaunchedEffect(Unit) {
         onRefreshVoiceOptions()
     }
@@ -5477,20 +5684,10 @@ private fun SettingsScreen(
             stopVoicePreview()
         }
     }
-    val fallbackVoiceOptions = remember {
-        VoicePreference.entries.map { preference ->
-            VoiceOption(
-                id = preference.backendVoiceId(),
-                name = preference.label,
-                previewAudioUrl = "android.resource://com.floppy.app/${R.raw.floppy_fallback_audio}",
-                providerVoiceId = preference.backendVoiceId(),
-                provider = "fallback"
-            )
-        }
-    }
+    val fallbackVoiceOptions = remember { LocalVoiceOptions.all() }
     val displayedVoiceOptions = voiceOptions.ifEmpty { fallbackVoiceOptions }
     val usingFallbackVoiceOptions = voiceOptions.isEmpty()
-    val fallbackVoiceId = draft.profile.voicePreference.backendVoiceId()
+    val fallbackVoiceId = LocalVoiceOptions.idFor(draft.profile.voicePreference)
     val activeVoiceId = selectedVoiceId
         ?.takeIf { selectedId -> displayedVoiceOptions.any { it.id == selectedId } }
         ?: fallbackVoiceId
@@ -5620,7 +5817,7 @@ private fun SettingsScreen(
 
         if (voicePickerOpen) {
             SettingsPickerSheet(
-                title = "请AI伙伴音色",
+                title = "请选择心仪的AI伙伴音色",
                 onClose = {
                     stopVoicePreview()
                     voicePickerOpen = false
@@ -5629,7 +5826,7 @@ private fun SettingsScreen(
                 when {
                     isLoadingVoiceOptions && voiceOptions.isEmpty() -> VoicePickerStatus("音色加载中...")
                     else -> displayedVoiceOptions.forEach { option ->
-                        val mappedPreference = VoicePreference.entries.firstOrNull { it.backendVoiceId() == option.id }
+                        val mappedPreference = VoicePreference.entries.firstOrNull { LocalVoiceOptions.idFor(it) == option.id }
                         VoiceOptionRow(
                             option = option,
                             selected = option.id == activeVoiceId,
@@ -6826,22 +7023,9 @@ private fun CompanionStyle.description(): String {
     }
 }
 
-private fun VoicePreference.backendVoiceId(): String {
-    return when (this) {
-        VoicePreference.WarmFemale -> "warm_female"
-        VoicePreference.CalmMale -> "warm_male"
-        VoicePreference.Neutral -> "neutral"
-        VoicePreference.Whisper -> "whisper"
-        VoicePreference.Story -> "storyteller_female"
-        VoicePreference.Radio -> "radio"
-        VoicePreference.Ocean -> "ocean_low"
-        VoicePreference.Bright -> "bright"
-    }
-}
-
 private fun agentStatusText(state: FloppyUiState): String {
     return when (state.agentState) {
-        AgentState.Idle -> "Floppy 在等你轻触或开始推荐"
+        AgentState.Idle -> "Floppy正在等你轻触为你推荐"
         AgentState.Listening -> "Floppy 正在听"
         AgentState.Recommending -> "正在推荐"
         AgentState.Generating -> "正在生成"

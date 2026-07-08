@@ -52,6 +52,7 @@ class StreamingSpeechSession(
 ) {
     private val isClosed = AtomicBoolean(false)
     private val isSocketOpen = AtomicBoolean(false)
+    private val isStopping = AtomicBoolean(false)
     private var webSocket: WebSocket? = null
     private var audioRecord: AudioRecord? = null
     private var audioThread: Thread? = null
@@ -75,7 +76,12 @@ class StreamingSpeechSession(
                 }
 
                 override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
-                    if (isClosed.get()) return
+                    if (isClosed.get() || (isStopping.get() && t.isExpectedStopClose())) {
+                        Log.d(SpeechLogTag, "Streaming speech socket closed after stop", t)
+                        onFinal("")
+                        finishSession()
+                        return
+                    }
                     Log.d(SpeechLogTag, "Streaming speech socket failed", t)
                     closeAudio()
                     onError(t.message ?: "流式语音连接失败")
@@ -83,6 +89,11 @@ class StreamingSpeechSession(
 
                 override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
                     Log.d(SpeechLogTag, "Streaming speech socket closed: $code $reason")
+                    if (isStopping.get() && !isClosed.get()) {
+                        onFinal("")
+                        finishSession()
+                        return
+                    }
                     closeAudio()
                 }
             }
@@ -92,6 +103,7 @@ class StreamingSpeechSession(
     fun stop() {
         if (isClosed.get()) return
         Log.d(SpeechLogTag, "Stopping streaming speech session")
+        isStopping.set(true)
         closeAudio()
         webSocket?.send("""{"type":"stop"}""")
     }
@@ -188,8 +200,15 @@ class StreamingSpeechSession(
 
     private fun closeSocket() {
         if (!isClosed.compareAndSet(false, true)) return
+        finishSession(closeSocket = true)
+    }
+
+    private fun finishSession(closeSocket: Boolean = false) {
+        isClosed.set(true)
         closeAudio()
-        webSocket?.close(1000, "done")
+        if (closeSocket) {
+            webSocket?.close(1000, "done")
+        }
         webSocket = null
     }
 
@@ -202,6 +221,10 @@ class StreamingSpeechSession(
             .put("channels", 1)
             .toString()
     }
+}
+
+private fun Throwable.isExpectedStopClose(): Boolean {
+    return message?.trim()?.equals("connection closed", ignoreCase = true) == true
 }
 
 private fun String.toWebSocketUrl(path: String): String {

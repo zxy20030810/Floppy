@@ -82,6 +82,8 @@ class FloppyViewModel(
     private var activeTextIntentRequestId: String? = null
     private var textIntentTurnIndex: Int = 0
     private var streamingSpeechSession: StreamingSpeechSession? = null
+    private var activeSpeechSessionId: Long? = null
+    private var speechSessionCounter: Long = 0L
 
     private var generationJob: Job? = null
 
@@ -100,7 +102,7 @@ class FloppyViewModel(
                     playback = playback,
                     agentState = deriveAgentState(mutableState.value.agentState, playback),
                     activeAudio = playback.currentAudio ?: mutableState.value.activeAudio,
-                    errorMessage = playback.errorMessage ?: mutableState.value.errorMessage
+                    errorMessage = playback.errorMessage.toUserFacingMessage() ?: mutableState.value.errorMessage
                 )
             }.collect { next ->
                 mutableState.value = next
@@ -109,7 +111,7 @@ class FloppyViewModel(
         viewModelScope.launch {
             runCatching { repository.refreshLibrary() }
                 .onFailure { error ->
-                    mutableState.update { it.copy(errorMessage = error.message ?: "音频列表加载失败") }
+                    mutableState.update { it.copy(errorMessage = error.toUserFacingMessage("音频列表加载失败")) }
                 }
         }
     }
@@ -120,7 +122,7 @@ class FloppyViewModel(
             runCatching { repository.saveProfile(profile) }
                 .onFailure { error ->
                     mutableState.update {
-                        it.copy(errorMessage = error.message ?: "画像保存失败，请稍后再试")
+                        it.copy(errorMessage = error.toUserFacingMessage("画像保存失败，请稍后再试"))
                     }
                 }
             mutableState.update { it.copy(isSubmittingProfile = false) }
@@ -132,7 +134,7 @@ class FloppyViewModel(
             runCatching { repository.updateSettings(settings) }
                 .onFailure { error ->
                     mutableState.update {
-                        it.copy(errorMessage = error.message ?: "设置更新失败")
+                        it.copy(errorMessage = error.toUserFacingMessage("设置更新失败"))
                     }
                 }
         }
@@ -188,14 +190,15 @@ class FloppyViewModel(
                     mutableState.update {
                         it.copy(
                             isSavingVoiceSelection = false,
-                            errorMessage = error.message ?: "音色保存失败"
+                            errorMessage = error.toUserFacingMessage("音色保存失败")
                         )
                     }
                 }
         }
     }
 
-    fun startSpeechListening() {
+    fun startSpeechListening(): Long {
+        val sessionId = nextSpeechSessionId()
         mutableState.update {
             it.copy(
                 isListening = true,
@@ -207,9 +210,11 @@ class FloppyViewModel(
                 errorMessage = null
             )
         }
+        return sessionId
     }
 
-    fun stopSpeechListening() {
+    fun stopSpeechListening(sessionId: Long) {
+        if (!isActiveSpeechSession(sessionId)) return
         mutableState.update {
             it.copy(
                 isListening = false,
@@ -221,7 +226,8 @@ class FloppyViewModel(
         }
     }
 
-    fun updateSpeechPartial(transcript: String) {
+    fun updateSpeechPartial(sessionId: Long, transcript: String) {
+        if (!isActiveSpeechSession(sessionId)) return
         val cleanTranscript = transcript.trim()
         if (cleanTranscript.isEmpty()) return
 
@@ -236,9 +242,11 @@ class FloppyViewModel(
         }
     }
 
-    fun completeSpeechListening(transcript: String?) {
+    fun completeSpeechListening(sessionId: Long, transcript: String?) {
+        if (!isActiveSpeechSession(sessionId)) return
         val cleanTranscript = transcript?.trim().takeUnless { it.isNullOrEmpty() }
             ?: mutableState.value.voicePartialTranscript
+        clearSpeechSession(sessionId)
 
         mutableState.update {
             it.copy(
@@ -261,8 +269,10 @@ class FloppyViewModel(
         }
     }
 
-    fun transcribeSpeechRecording(uri: Uri, fileName: String, mimeType: String?) {
+    fun transcribeSpeechRecording(sessionId: Long, uri: Uri, fileName: String, mimeType: String?) {
+        if (!isActiveSpeechSession(sessionId)) return
         viewModelScope.launch {
+            if (!isActiveSpeechSession(sessionId)) return@launch
             mutableState.update {
                 it.copy(
                     isListening = false,
@@ -277,19 +287,24 @@ class FloppyViewModel(
                     val cleanTranscript = transcript.trim()
                     if (cleanTranscript.isEmpty()) {
                         Log.d(SpeechLogTag, "ASR returned empty transcript")
-                        completeSpeechListening(null)
+                        completeSpeechListening(sessionId, null)
                     } else {
                         Log.d(SpeechLogTag, "ASR transcript: $cleanTranscript")
-                        completeSpeechListening(cleanTranscript)
+                        completeSpeechListening(sessionId, cleanTranscript)
                     }
                 }
                 .onFailure { error ->
+                    if (!isActiveSpeechSession(sessionId)) {
+                        Log.d(SpeechLogTag, "Ignoring stale ASR transcription failure", error)
+                        return@onFailure
+                    }
                     Log.d(SpeechLogTag, "ASR transcription failed", error)
+                    clearSpeechSession(sessionId)
                     mutableState.update {
                         it.copy(
                             isSubmittingVoiceIntent = false,
                             generationMessage = null,
-                            errorMessage = error.message ?: "语音转文字失败，请再试一次或使用文字输入"
+                            errorMessage = error.toUserFacingMessage("语音转文字失败，请再试一次或使用文字输入")
                         )
                     }
                 }
@@ -301,24 +316,33 @@ class FloppyViewModel(
     ): Boolean {
         val client = repository.streamingSpeechClient ?: return false
         stopStreamingSpeech()
+        val sessionId = startSpeechListening()
         return runCatching {
-            startSpeechListening()
             streamingSpeechSession = client.start(
                 onPartial = { transcript ->
                     viewModelScope.launch {
-                        updateSpeechPartial(transcript)
+                        updateSpeechPartial(sessionId, transcript)
                     }
                 },
                 onFinal = { transcript ->
                     viewModelScope.launch {
+                        if (!isActiveSpeechSession(sessionId)) {
+                            Log.d(SpeechLogTag, "Ignoring stale streaming final")
+                            return@launch
+                        }
                         streamingSpeechSession = null
-                        completeSpeechListening(transcript)
+                        completeSpeechListening(sessionId, transcript)
                     }
                 },
                 onError = { message ->
                     viewModelScope.launch {
+                        if (!isActiveSpeechSession(sessionId)) {
+                            Log.d(SpeechLogTag, "Ignoring stale streaming error: $message")
+                            return@launch
+                        }
                         streamingSpeechSession?.cancel()
                         streamingSpeechSession = null
+                        clearSpeechSession(sessionId)
                         mutableState.update {
                             it.copy(
                                 isListening = false,
@@ -334,6 +358,18 @@ class FloppyViewModel(
                 }
             )
         }.onFailure { error ->
+            if (isActiveSpeechSession(sessionId)) {
+                clearSpeechSession(sessionId)
+                mutableState.update {
+                    it.copy(
+                        isListening = false,
+                        agentState = AgentState.Idle,
+                        voicePartialTranscript = null,
+                        isSubmittingVoiceIntent = false,
+                        generationMessage = null
+                    )
+                }
+            }
             Log.d(SpeechLogTag, "Streaming ASR start failed", error)
         }.isSuccess
     }
@@ -352,7 +388,38 @@ class FloppyViewModel(
         }
     }
 
-    fun failSpeechListening(message: String) {
+    fun cancelSpeechListening() {
+        val currentState = mutableState.value
+        val shouldCancel = currentState.isListening ||
+            currentState.agentState == AgentState.Listening ||
+            streamingSpeechSession != null
+        if (!shouldCancel) return
+
+        activeSpeechSessionId?.let(::clearSpeechSession)
+        streamingSpeechSession?.cancel()
+        streamingSpeechSession = null
+        mutableState.update {
+            it.copy(
+                isListening = false,
+                agentState = if (it.agentState == AgentState.Listening) AgentState.Idle else it.agentState,
+                voicePartialTranscript = null,
+                isSubmittingVoiceIntent = false,
+                generationMessage = if (it.isListening || it.agentState == AgentState.Listening) {
+                    null
+                } else {
+                    it.generationMessage
+                }
+            )
+        }
+    }
+
+    fun failSpeechListening(sessionId: Long, message: String) {
+        if (!isActiveSpeechSession(sessionId)) return
+        failSpeechListening(message, sessionId)
+    }
+
+    private fun failSpeechListening(message: String, sessionId: Long? = activeSpeechSessionId) {
+        sessionId?.let(::clearSpeechSession)
         mutableState.update {
             it.copy(
                 isListening = false,
@@ -360,7 +427,7 @@ class FloppyViewModel(
                 voicePartialTranscript = null,
                 isSubmittingVoiceIntent = false,
                 generationMessage = it.voiceTranscript?.let { transcript -> "听到：$transcript" },
-                errorMessage = message
+                errorMessage = message.toUserFacingMessage()
             )
         }
     }
@@ -405,7 +472,7 @@ class FloppyViewModel(
                         it.copy(
                             agentState = AgentState.Failed,
                             generationMessage = null,
-                            errorMessage = error.message ?: "推荐失败，请稍后再试"
+                            errorMessage = error.toUserFacingMessage("推荐失败，请稍后再试")
                         )
                     }
                 }
@@ -477,7 +544,7 @@ class FloppyViewModel(
                 }
             }.onFailure { error ->
                 mutableState.update {
-                    it.copy(errorMessage = error.message ?: "反馈提交失败，请重试")
+                    it.copy(errorMessage = error.toUserFacingMessage("反馈提交失败，请重试"))
                 }
             }
         }
@@ -563,7 +630,7 @@ class FloppyViewModel(
                         it.copy(
                             isSubmittingTextIntent = false,
                             isSubmittingVoiceIntent = false,
-                            errorMessage = error.message ?: "消息发送失败，请稍后再试"
+                            errorMessage = error.toUserFacingMessage("消息发送失败，请稍后再试")
                         )
                     }
                 }
@@ -577,6 +644,22 @@ class FloppyViewModel(
     private fun clearActiveTextIntent(requestId: String) {
         if (activeTextIntentRequestId == requestId) {
             activeTextIntentRequestId = null
+        }
+    }
+
+    private fun nextSpeechSessionId(): Long {
+        val sessionId = ++speechSessionCounter
+        activeSpeechSessionId = sessionId
+        return sessionId
+    }
+
+    private fun isActiveSpeechSession(sessionId: Long): Boolean {
+        return activeSpeechSessionId == sessionId
+    }
+
+    private fun clearSpeechSession(sessionId: Long) {
+        if (activeSpeechSessionId == sessionId) {
+            activeSpeechSessionId = null
         }
     }
 
@@ -595,7 +678,7 @@ class FloppyViewModel(
         viewModelScope.launch {
             runCatching { repository.startUpload(uri, fileName, fileType, mimeType) }
                 .onFailure { error ->
-                    mutableState.update { it.copy(errorMessage = error.message ?: "上传失败，请重试") }
+                    mutableState.update { it.copy(errorMessage = error.toUserFacingMessage("上传失败，请重试")) }
             }
         }
     }
@@ -613,7 +696,7 @@ class FloppyViewModel(
         viewModelScope.launch {
             runCatching { repository.retryUpload(uploadId) }
                 .onFailure { error ->
-                    mutableState.update { it.copy(errorMessage = error.message ?: "重试上传失败") }
+                    mutableState.update { it.copy(errorMessage = error.toUserFacingMessage("重试上传失败")) }
                 }
         }
     }
@@ -622,7 +705,7 @@ class FloppyViewModel(
         viewModelScope.launch {
             runCatching { repository.completeUpload(uploadId) }
                 .onFailure { error ->
-                    mutableState.update { it.copy(errorMessage = error.message ?: "上传完成状态同步失败") }
+                    mutableState.update { it.copy(errorMessage = error.toUserFacingMessage("上传完成状态同步失败")) }
                 }
         }
     }
@@ -664,7 +747,7 @@ class FloppyViewModel(
                                 mutableState.update {
                                     it.copy(
                                         agentState = AgentState.Failed,
-                                        errorMessage = nextTask.message
+                                        errorMessage = nextTask.message.toUserFacingMessage()
                                     )
                                 }
                                 return@launch
@@ -687,7 +770,7 @@ class FloppyViewModel(
                         it.copy(
                             agentState = AgentState.Failed,
                             generationMessage = null,
-                            errorMessage = error.message ?: "生成失败，请稍后再试"
+                            errorMessage = error.toUserFacingMessage("生成失败，请稍后再试")
                         )
                     }
                 }
@@ -718,4 +801,24 @@ class FloppyViewModel(
             return FloppyViewModel(repository, playbackController) as T
         }
     }
+}
+
+private fun Throwable.toUserFacingMessage(fallback: String): String? {
+    val cleanMessage = message?.trim()
+    return when {
+        cleanMessage.isNullOrEmpty() -> fallback
+        cleanMessage.isHiddenTransientMessage() -> null
+        else -> cleanMessage
+    }
+}
+
+private fun String?.toUserFacingMessage(): String? {
+    val cleanMessage = this?.trim().orEmpty()
+    return cleanMessage
+        .takeIf { it.isNotEmpty() }
+        ?.takeUnless { it.isHiddenTransientMessage() }
+}
+
+private fun String.isHiddenTransientMessage(): Boolean {
+    return equals("connection closed", ignoreCase = true)
 }

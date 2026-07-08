@@ -1,0 +1,414 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Floppy 睡前陪伴 Agent 完整架构</title>
+  <script src="https://unpkg.com/roughjs@4.6.6/bundled/rough.js"></script>
+  <style>
+    html,
+    body {
+      margin: 0;
+      min-height: 100%;
+      background: #ffffff;
+      color: #1e1e1e;
+      font-family: "Comic Sans MS", "Segoe Print", "PingFang SC", "Microsoft YaHei", cursive;
+    }
+
+    body {
+      display: grid;
+      place-items: center;
+      overflow: auto;
+    }
+
+    .stage {
+      width: min(100vw, 1800px);
+      aspect-ratio: 1800 / 1480;
+      background: #ffffff;
+    }
+
+    canvas {
+      display: block;
+      width: 100%;
+      height: 100%;
+      background: #ffffff;
+    }
+  </style>
+</head>
+<body>
+  <div class="stage">
+    <canvas id="architecture" aria-label="Floppy 睡前陪伴 Agent 完整架构图"></canvas>
+  </div>
+
+  <script>
+    const canvas = document.getElementById("architecture");
+    const ctx = canvas.getContext("2d");
+    const W = 1800;
+    const H = 1480;
+    const DPR = Math.max(1, window.devicePixelRatio || 1);
+
+    canvas.width = Math.round(W * DPR);
+    canvas.height = Math.round(H * DPR);
+    ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+    ctx.clearRect(0, 0, W, H);
+
+    const rc = rough.canvas(canvas);
+    const ink = "#1e1e1e";
+    const blue = "#eaf2ff";
+    const purple = "#efe9fb";
+    const yellow = "#fff7e6";
+    const gray = "#f0f0f0";
+    const green = "#e9f8ef";
+    const violetInk = "#6b4acb";
+    const blueInk = "#1f73d8";
+
+    const roughBase = {
+      roughness: 1.36,
+      bowing: 1.08,
+      stroke: ink,
+      strokeWidth: 2.2
+    };
+
+    const fontStack = '"Comic Sans MS", "Segoe Print", "PingFang SC", "Microsoft YaHei", cursive';
+
+    function rrPath(x, y, w, h, r = 10) {
+      return [
+        `M ${x + r} ${y}`,
+        `L ${x + w - r} ${y}`,
+        `Q ${x + w} ${y} ${x + w} ${y + r}`,
+        `L ${x + w} ${y + h - r}`,
+        `Q ${x + w} ${y + h} ${x + w - r} ${y + h}`,
+        `L ${x + r} ${y + h}`,
+        `Q ${x} ${y + h} ${x} ${y + h - r}`,
+        `L ${x} ${y + r}`,
+        `Q ${x} ${y} ${x + r} ${y}`,
+        "Z"
+      ].join(" ");
+    }
+
+    function box(x, y, w, h, fill = "#ffffff", opts = {}) {
+      const path = rrPath(x, y, w, h, opts.r || 10);
+      rc.path(path, {
+        ...roughBase,
+        fill,
+        fillStyle: opts.fillStyle || "solid",
+        hachureGap: opts.hachureGap || 8,
+        strokeWidth: opts.strokeWidth || 2.2,
+        roughness: opts.roughness || 1.36,
+        bowing: opts.bowing || 1.08
+      });
+    }
+
+    function text(str, x, y, size = 14, opts = {}) {
+      ctx.save();
+      ctx.font = `${opts.weight || 600} ${size}px ${fontStack}`;
+      ctx.fillStyle = opts.color || ink;
+      ctx.textAlign = opts.align || "center";
+      ctx.textBaseline = opts.baseline || "middle";
+      ctx.lineWidth = opts.lineWidth || 0;
+      if (opts.maxWidth) {
+        ctx.fillText(str, x, y, opts.maxWidth);
+      } else {
+        ctx.fillText(str, x, y);
+      }
+      ctx.restore();
+    }
+
+    function multiline(lines, x, y, size = 14, opts = {}) {
+      const lineHeight = opts.lineHeight || size * 1.42;
+      const offset = (lines.length - 1) * lineHeight / 2;
+      lines.forEach((line, i) => text(line, x, y - offset + i * lineHeight, size, opts));
+    }
+
+    function whiteLabel(str, x, y, size = 11, opts = {}) {
+      ctx.save();
+      ctx.font = `${opts.weight || 600} ${size}px ${fontStack}`;
+      const metrics = ctx.measureText(str);
+      const padX = opts.padX || 7;
+      const padY = opts.padY || 3;
+      const w = metrics.width + padX * 2;
+      const h = size + padY * 2;
+      const left = opts.align === "left" ? x - padX : x - w / 2;
+      const top = y - h / 2;
+      ctx.restore();
+      rc.path(rrPath(left, top, w, h, 5), {
+        ...roughBase,
+        stroke: "#ffffff",
+        fill: "#ffffff",
+        fillStyle: "solid",
+        strokeWidth: 0.5,
+        roughness: 1.25,
+        bowing: 1
+      });
+      text(str, x, y, size, opts);
+    }
+
+    function line(x1, y1, x2, y2, opts = {}) {
+      rc.line(x1, y1, x2, y2, {
+        ...roughBase,
+        stroke: opts.stroke || ink,
+        strokeWidth: opts.strokeWidth || 2,
+        roughness: opts.roughness || 1.34,
+        bowing: opts.bowing || 1.1,
+        strokeLineDash: opts.dash
+      });
+    }
+
+    function arrowHead(x, y, angle, color = ink, size = 10) {
+      const a1 = angle + Math.PI * 0.82;
+      const a2 = angle - Math.PI * 0.82;
+      line(x, y, x + Math.cos(a1) * size, y + Math.sin(a1) * size, { stroke: color, strokeWidth: 2 });
+      line(x, y, x + Math.cos(a2) * size, y + Math.sin(a2) * size, { stroke: color, strokeWidth: 2 });
+    }
+
+    function arrow(points, opts = {}) {
+      const color = opts.stroke || ink;
+      for (let i = 0; i < points.length - 1; i += 1) {
+        const p = points[i];
+        const n = points[i + 1];
+        line(p[0], p[1], n[0], n[1], {
+          stroke: color,
+          strokeWidth: opts.strokeWidth || 2,
+          dash: opts.dash
+        });
+      }
+      const p1 = points[points.length - 2];
+      const p2 = points[points.length - 1];
+      arrowHead(p2[0], p2[1], Math.atan2(p2[1] - p1[1], p2[0] - p1[0]), color, opts.headSize || 10);
+      if (opts.both) {
+        const p0 = points[0];
+        const pNext = points[1];
+        arrowHead(p0[0], p0[1], Math.atan2(p0[1] - pNext[1], p0[0] - pNext[0]), color, opts.headSize || 10);
+      }
+    }
+
+    function bus(y, x1, x2, branches, opts = {}) {
+      line(x1, y, x2, y, { stroke: opts.stroke || ink, strokeWidth: opts.strokeWidth || 2 });
+      branches.forEach((b) => {
+        arrow([[b.x, y], [b.x, b.y]], {
+          stroke: opts.stroke || ink,
+          strokeWidth: opts.strokeWidth || 2,
+          headSize: opts.headSize || 9
+        });
+      });
+    }
+
+    function arcArrow(cx, cy, rx, ry, start, end, color, opts = {}) {
+      const steps = opts.steps || 46;
+      const pts = [];
+      for (let i = 0; i <= steps; i += 1) {
+        const t = start + (end - start) * i / steps;
+        pts.push([cx + Math.cos(t) * rx, cy + Math.sin(t) * ry]);
+      }
+      for (let i = 0; i < pts.length - 1; i += 1) {
+        line(pts[i][0], pts[i][1], pts[i + 1][0], pts[i + 1][1], {
+          stroke: color,
+          strokeWidth: opts.strokeWidth || 2.2,
+          dash: opts.dash
+        });
+      }
+      const a = Math.atan2(pts[pts.length - 1][1] - pts[pts.length - 2][1], pts[pts.length - 1][0] - pts[pts.length - 2][0]);
+      arrowHead(pts[pts.length - 1][0], pts[pts.length - 1][1], a, color, opts.headSize || 12);
+    }
+
+    function ellipse(cx, cy, rx, ry, opts = {}) {
+      rc.ellipse(cx, cy, rx * 2, ry * 2, {
+        ...roughBase,
+        stroke: opts.stroke || ink,
+        strokeWidth: opts.strokeWidth || 1.8,
+        roughness: opts.roughness || 1.35,
+        bowing: opts.bowing || 1.1,
+        fill: opts.fill,
+        fillStyle: opts.fill ? "solid" : undefined,
+        strokeLineDash: opts.dash
+      });
+    }
+
+    function layerLabel(label, y) {
+      box(26, y, 148, 56, gray, { r: 10 });
+      text(label, 100, y + 28, 15, { weight: 700 });
+    }
+
+    function smallPill(label, x, y, w, h) {
+      box(x, y, w, h, "#ffffff", { r: 10, strokeWidth: 1.8 });
+      text(label, x + w / 2, y + h / 2, 12, { weight: 600 });
+    }
+
+    function sectionTitle(icon, title, x, y) {
+      text(`${icon}  ${title}`, x, y, 16, { weight: 700 });
+    }
+
+    // Title
+    text("Floppy · 睡前陪伴 Agent 完整架构", W / 2, 42, 20, { weight: 800 });
+    text("两个 Loop 驱动：✹ 陪伴 Loop（清醒·实时） + 🌙 做梦 Loop（入睡后·自我进化）", W / 2, 74, 13, { weight: 700 });
+
+    // Layer labels
+    layerLabel("用户 & 场景", 118);
+    layerLabel("交互层", 232);
+    layerLabel("编排层", 370);
+    layerLabel("多 Agent 层", 520);
+    layerLabel("核心能力层", 706);
+    layerLabel("支撑层", 960);
+
+    // Top layered bars
+    box(470, 116, 900, 58, blue, { r: 10 });
+    text("👤  用户 · 睡前场景：睡前30分钟 / 入睡困难 / 失眠无聊 / 焦虑放松", 920, 145, 17, { weight: 700 });
+
+    arrow([[920, 174], [920, 210]], { both: true, headSize: 9 });
+
+    box(390, 220, 1060, 82, blue, { r: 10 });
+    text("🎙️  自然语言对话入口   +   🔔  主动唤醒 & 低打扰交互", 920, 248, 17, { weight: 700 });
+    text("喜欢 / 不喜欢 / 换内容 / 调整声音 / 继续播放 · 无回应 → 自动降音量 · 定时关闭", 920, 274, 12, { weight: 600 });
+
+    arrow([[920, 302], [920, 350]], { both: true, headSize: 9 });
+
+    box(390, 350, 1060, 70, yellow, { r: 10 });
+    text("🧭  多 Agent 协同编排 · 睡前陪伴流程（Agentic Loop）", 920, 376, 17, { weight: 700 });
+    text("识别状态 → 询问偏好 → 选内容 → 生成/推荐 → 播放 → 反馈 → 记录 → 次日反馈", 920, 400, 12, { weight: 600 });
+
+    // Agent fan-out bus
+    bus(456, 470, 1370, [
+      { x: 470, y: 490 },
+      { x: 660, y: 490 },
+      { x: 850, y: 490 },
+      { x: 1040, y: 490 },
+      { x: 1230, y: 490 },
+      { x: 1360, y: 490 }
+    ]);
+    arrow([[920, 420], [920, 456]], { headSize: 9 });
+
+    const agents = [
+      ["意图识别", "Agent", 274],
+      ["内容推荐", "Agent", 478],
+      ["音频生成", "Agent", 682],
+      ["情绪陪伴", "Agent", 886],
+      ["睡眠数据", "分析 Agent", 1090],
+      ["内容安全", "Agent", 1294]
+    ];
+
+    agents.forEach(([a, b, x]) => {
+      box(x, 488, 184, 68, "#ffffff", { r: 10 });
+      text(a, x + 92, 514, 15, { weight: 700 });
+      text(b, x + 92, 538, 12, { weight: 600 });
+    });
+
+    bus(582, 470, 1370, [
+      { x: 380, y: 604 },
+      { x: 920, y: 604 },
+      { x: 1370, y: 604 }
+    ], { headSize: 9 });
+    line(470, 556, 470, 582);
+    line(660, 556, 660, 582);
+    line(850, 556, 850, 582);
+    line(1040, 556, 1040, 582);
+    line(1230, 556, 1230, 582);
+    line(1370, 556, 1370, 582);
+
+    // Core capability row
+    box(182, 610, 410, 72, green, { r: 10 });
+    text("🧠  大模型意图识别 & 推理", 387, 637, 16, { weight: 700 });
+    text("状态 · 情绪 · 真实需求", 387, 663, 12, { weight: 600 });
+
+    box(735, 610, 390, 72, green, { r: 10 });
+    text("🎨  多模态内容生成", 930, 637, 16, { weight: 700 });
+    text("故事 · 冥想 · ASMR · 播客摘要 · TTS · 混音", 930, 663, 12, { weight: 600 });
+
+    box(1280, 610, 390, 72, green, { r: 10 });
+    text("✨  个性化 AI 推荐", 1475, 637, 16, { weight: 700 });
+    text("画像 · 情绪 · 历史反馈", 1475, 663, 12, { weight: 600 });
+
+    // Support cards and arrows
+    arrow([[370, 785], [370, 865]], { both: true, headSize: 10 });
+    arrow([[920, 785], [920, 865]], { both: true, headSize: 10 });
+    arrow([[1470, 785], [1470, 865]], { both: true, headSize: 10 });
+
+    box(182, 864, 410, 200, "#ffffff", { r: 10 });
+    sectionTitle("🗂️", "三层记忆 & 用户画像", 387, 893);
+    smallPill("短期：会话上下文 · 即时偏好", 208, 930, 358, 36);
+    smallPill("中期：近期行为 · 收听反馈 · 作息", 208, 977, 358, 36);
+    smallPill("长期：稳定偏好 · 声音喜好 · 内容禁忌", 208, 1024, 358, 36);
+
+    box(735, 864, 390, 200, "#ffffff", { r: 10 });
+    sectionTitle("📚", "RAG 知识库检索", 930, 893);
+    smallPill("睡眠知识库", 760, 930, 172, 36);
+    smallPill("冥想脚本库", 948, 930, 152, 36);
+    smallPill("睡前故事库", 760, 977, 172, 36);
+    smallPill("书籍 · 播客", 948, 977, 152, 36);
+    smallPill("降低生成空泛 / 不稳定", 760, 1024, 340, 36);
+
+    box(1280, 864, 390, 200, "#ffffff", { r: 10 });
+    sectionTitle("🔧", "工具调用", 1475, 893);
+    smallPill("TTS 合成", 1306, 930, 172, 32);
+    smallPill("白噪音 / 音乐", 1494, 930, 152, 32);
+    smallPill("播放器", 1306, 970, 172, 32);
+    smallPill("定时关闭", 1494, 970, 152, 32);
+    smallPill("睡眠数据", 1306, 1010, 172, 32);
+    smallPill("待办记录", 1494, 1010, 152, 32);
+    smallPill("内容解析", 1306, 1050, 172, 32);
+    smallPill("偏好存储", 1494, 1050, 152, 32);
+
+    // Loop area connector
+    arrow([[930, 1064], [930, 1100]], { headSize: 9 });
+
+    // Companion and dream loop
+    text("两个嵌套 Loop", 930, 1120, 14, { weight: 800 });
+    ellipse(930, 1248, 175, 150, { stroke: blueInk, strokeWidth: 1.8, dash: [8, 6] });
+    ellipse(930, 1248, 118, 100, { stroke: violetInk, strokeWidth: 1.6, dash: [6, 6] });
+
+    arcArrow(930, 1248, 160, 135, -2.25, -0.20, blueInk, { strokeWidth: 2.4 });
+    arcArrow(930, 1248, 160, 135, 0.10, 2.38, blueInk, { strokeWidth: 2.4 });
+    arcArrow(930, 1248, 118, 98, 2.85, 4.78, violetInk, { strokeWidth: 2.2 });
+    arcArrow(930, 1248, 118, 98, 4.92, 6.72, violetInk, { strokeWidth: 2.2 });
+
+    box(855, 1210, 150, 76, yellow, { r: 10 });
+    text("Floppy 核心", 930, 1232, 16, { weight: 800 });
+    text("推理 · 记忆", 930, 1256, 12, { weight: 700 });
+    text("编排 · RAG", 930, 1277, 12, { weight: 700 });
+
+    box(850, 1080, 160, 48, "#ffffff", { r: 10 });
+    text("①识别状态", 930, 1105, 15, { weight: 700 });
+    box(1025, 1144, 168, 56, "#ffffff", { r: 10 });
+    text("②生成/推荐", 1109, 1163, 13, { weight: 700 });
+    text("用于轻分级", 1109, 1183, 11, { weight: 700, color: blueInk });
+    text("陪伴 Loop", 1176, 1143, 11, { weight: 800, color: blueInk, align: "right" });
+    box(1025, 1326, 168, 48, "#ffffff", { r: 10 });
+    text("③播放陪伴", 1109, 1351, 15, { weight: 700 });
+    box(850, 1395, 160, 48, "#ffffff", { r: 10 });
+    text("④感知反馈", 930, 1420, 15, { weight: 700 });
+    whiteLabel("无回应=已入睡", 930, 1460, 11, { color: violetInk, weight: 800 });
+    box(712, 1326, 168, 48, "#ffffff", { r: 10 });
+    text("⑤睡眠复盘", 796, 1351, 15, { weight: 700 });
+    text("🌙  做梦 Loop", 705, 1330, 11, { weight: 800, color: violetInk, align: "right" });
+    text("入睡后天级", 700, 1354, 11, { weight: 800, color: violetInk, align: "right" });
+    box(712, 1144, 168, 56, "#ffffff", { r: 10 });
+    text("⑥更新记忆", 796, 1163, 14, { weight: 700 });
+    text("预生成次日", 796, 1184, 14, { weight: 700 });
+
+    // Line masks for labels crossing loop arrows.
+    whiteLabel("清醒 · 实时", 1077, 1212, 10, { color: blueInk, weight: 800 });
+    whiteLabel("离线 · 自进化", 775, 1275, 10, { color: violetInk, weight: 800 });
+
+    // Dream-loop note
+    box(1334, 1132, 396, 274, purple, { r: 10 });
+    text("🌙  「做梦」- 离线自我进化 Loop", 1532, 1168, 16, { weight: 800, color: "#6b4acb" });
+    text("像人脑睡眠整理记忆一样，用户入睡后", 1532, 1210, 13, { weight: 700 });
+    text("Agent 进入离线循环：", 1454, 1234, 13, { weight: 700, align: "left" });
+    const noteLines = [
+      "· 复盘当晚睡眠 & 收听数据",
+      "· 巩固 / 更新长期记忆与画像",
+      "· 预生成次日推荐与陪伴内容",
+      "· 生成个性化睡眠报告"
+    ];
+    noteLines.forEach((l, i) => text(l, 1415, 1270 + i * 25, 12, { weight: 700, align: "left" }));
+    multiline([
+      "两个 Loop 嵌套 → 快循环调内容，",
+      "慢循环持续进化，越用越懂你。"
+    ], 1532, 1380, 12, { weight: 800, color: "#55515f", lineHeight: 20 });
+
+    // A few white-backed labels near longer connectors.
+    whiteLabel("状态与反馈回写", 370, 824, 10);
+    whiteLabel("知识增强生成", 920, 824, 10);
+    whiteLabel("播放 / 记录 / 偏好", 1470, 824, 10);
+  </script>
+</body>
+</html>

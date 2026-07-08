@@ -5,7 +5,6 @@ import com.floppy.app.domain.AudioItem
 import com.floppy.app.domain.AudioLibrary
 import com.floppy.app.domain.Feedback
 import com.floppy.app.domain.GenerationTask
-import com.floppy.app.domain.RecommendationResult
 import com.floppy.app.domain.UploadItem
 import com.floppy.app.domain.UserProfile
 import com.floppy.app.domain.VoiceOption
@@ -40,7 +39,7 @@ interface FloppyApi {
     ): BackendEventResponse
 
     @POST("v1/recommendations")
-    suspend fun recommend(@Body profile: UserProfile): RecommendationResult
+    suspend fun recommend(@Body profile: UserProfile): RecommendationResponse
 
     @POST("v1/generation-tasks")
     suspend fun createGenerationTask(@Body request: GenerationRequest): GenerationTask
@@ -115,6 +114,20 @@ interface FloppyApi {
 data class GenerationRequest(
     val prompt: String,
     val profile: UserProfile
+)
+
+data class RecommendationResponse(
+    val action: String? = null,
+    val type: String? = null,
+    val audio: AudioItem? = null,
+    @SerializedName("asset")
+    val asset: AudioItem? = null,
+    @SerializedName("audio_url")
+    val audioUrl: String? = null,
+    val prompt: String? = null,
+    @SerializedName("generation_prompt")
+    val generationPrompt: String? = null,
+    val message: String? = null
 )
 
 data class UserQuestionnaireRequest(

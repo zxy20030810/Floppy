@@ -3,8 +3,10 @@ package com.floppy.app.data
 import android.content.Context
 import android.net.Uri
 import com.floppy.app.domain.AppSettings
+import com.floppy.app.domain.AudioArtwork
 import com.floppy.app.domain.AudioItem
 import com.floppy.app.domain.AudioLibrary
+import com.floppy.app.domain.AudioSource
 import com.floppy.app.domain.AgeRange
 import com.floppy.app.domain.CareerChoice
 import com.floppy.app.domain.CompanionStyle
@@ -33,6 +35,9 @@ import java.io.IOException
 import java.util.Locale
 import java.util.UUID
 
+private val RecommendationGenerationActions = setOf("generate", "generation", "generate_job", "needs_generation")
+private val RecommendationReadyActions = setOf("ready", "play", "play_asset", "recommendation", "audio")
+
 class RemoteFloppyRepository(
     context: Context,
     private val api: FloppyApi,
@@ -58,6 +63,7 @@ class RemoteFloppyRepository(
 
         api.saveQuestionnaire(userId, profile.toQuestionnaireRequest())
         api.saveProfile(userId, profile.toBackendProfileRequest())
+
         profile.companionPrompt.trim().takeIf { it.isNotEmpty() }?.let { prompt ->
             runCatching {
                 api.recordEvent(
@@ -82,7 +88,7 @@ class RemoteFloppyRepository(
         onProfileSaved?.invoke(settingsState.value.profile)
     }
 
-    override suspend fun recommend(profile: UserProfile): RecommendationResult = api.recommend(profile)
+    override suspend fun recommend(profile: UserProfile): RecommendationResult = api.recommend(profile).toRecommendationResult()
 
     override suspend fun createGenerationTask(prompt: String, profile: UserProfile): GenerationTask =
         api.createGenerationTask(GenerationRequest(prompt, profile))
@@ -112,14 +118,11 @@ class RemoteFloppyRepository(
     }
 
     override suspend fun getVoiceOptions(): List<VoiceOption> {
-        return api.getVoiceOptions().voices.map { option ->
-            option.copy(previewAudioUrl = option.previewAudioUrl.absoluteBackendUrl())
-        }
+        return LocalVoiceOptions.all()
     }
 
     override suspend fun saveVoiceSelection(voiceId: String) {
-        api.saveVoiceSelection(VoiceSelectionRequest(userId = userId, voiceId = voiceId))
-        val selectedPreference = VoicePreference.entries.firstOrNull { it.toBackendValue() == voiceId }
+        val selectedPreference = VoicePreference.entries.firstOrNull { LocalVoiceOptions.idFor(it) == voiceId }
             ?: return
         val nextSettings = settingsState.value.copy(
             profile = settingsState.value.profile.copy(voicePreference = selectedPreference)
@@ -253,6 +256,52 @@ class RemoteFloppyRepository(
             streamUrl = streamUrl.absoluteBackendUrl(),
             coverUrl = coverUrl?.absoluteBackendUrl(),
             artwork = fixedArtwork
+        )
+    }
+
+    private fun RecommendationResponse.toRecommendationResult(): RecommendationResult {
+        val responseAudio = (audio ?: asset)?.withPlayableUrl() ?: audioUrlAudioItem()
+        val playableAudio = responseAudio?.let { item ->
+            if (item.streamUrl.isBlank()) {
+                item.copy(streamUrl = audioUrl.orEmpty().absoluteBackendUrl())
+            } else {
+                item
+            }
+        }
+        if (playableAudio != null && playableAudio.streamUrl.isNotBlank()) {
+            return RecommendationResult.Ready(playableAudio)
+        }
+
+        val nextPrompt = generationPrompt
+            ?: prompt
+            ?: message
+            ?: "生成一段适合今晚入睡的 Floppy 睡前音频"
+        val normalizedAction = action.orEmpty().lowercase(Locale.US)
+        val normalizedType = type.orEmpty().lowercase(Locale.US)
+        return when {
+            normalizedAction in RecommendationGenerationActions -> RecommendationResult.NeedsGeneration(nextPrompt)
+            normalizedType in RecommendationGenerationActions -> RecommendationResult.NeedsGeneration(nextPrompt)
+            normalizedAction in RecommendationReadyActions && playableAudio != null -> RecommendationResult.Ready(playableAudio)
+            normalizedType in RecommendationReadyActions && playableAudio != null -> RecommendationResult.Ready(playableAudio)
+            else -> RecommendationResult.NeedsGeneration(nextPrompt)
+        }
+    }
+
+    private fun RecommendationResponse.audioUrlAudioItem(): AudioItem? {
+        val playableUrl = audioUrl?.absoluteBackendUrl()?.takeIf { it.isNotBlank() } ?: return null
+        val title = message?.takeIf { it.isNotBlank() } ?: "今晚推荐音频"
+        return AudioItem(
+            id = "recommendation-${playableUrl.hashCode()}",
+            title = title,
+            subtitle = action ?: type ?: "Floppy 推荐",
+            durationSeconds = 60,
+            streamUrl = playableUrl,
+            artwork = AudioArtwork(
+                seedColor = 0xFF7D6BFF,
+                prompt = title
+            ),
+            source = AudioSource.Library,
+            category = "Recommendation"
         )
     }
 

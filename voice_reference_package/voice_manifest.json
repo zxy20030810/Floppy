@@ -1,0 +1,63 @@
+{
+  "package": "floppy_voice_reference",
+  "version": "0.1.0",
+  "usage": "Frontend sends voice_id with chat or voice intent requests. Backend maps voice_id to TTS voice/model/style and returns generated audio_url.",
+  "voices": [
+    {
+      "voice_id": "warm_female",
+      "display_name": "温暖治愈音",
+      "reference_file": "voice_warm_female.wav",
+      "style_prompt": "Young female voice, warm, gentle, soothing, close and relaxing. Suitable for bedtime comfort.",
+      "avoid": "Do not sound robotic, overly excited, commercial, or like a news anchor."
+    },
+    {
+      "voice_id": "warm_male",
+      "display_name": "沉稳低音",
+      "reference_file": "voice_calm_male.wav",
+      "style_prompt": "Mature male voice, low, stable, slow, calm, safe-feeling.",
+      "avoid": "Do not sound robotic, overly excited, commercial, or like a news anchor."
+    },
+    {
+      "voice_id": "neutral",
+      "display_name": "清澈中性音",
+      "reference_file": "voice_neutral.wav",
+      "style_prompt": "Neutral voice, clear, natural, clean, emotionally restrained.",
+      "avoid": "Do not sound robotic, overly excited, commercial, or like a news anchor."
+    },
+    {
+      "voice_id": "whisper",
+      "display_name": "轻柔低语音",
+      "reference_file": "voice_whisper.wav",
+      "style_prompt": "Soft whisper-like voice, slow and close, but still clear and intelligible.",
+      "avoid": "Do not make the voice too airy, unclear, robotic, or theatrical."
+    },
+    {
+      "voice_id": "storyteller_female",
+      "display_name": "睡前故事音",
+      "reference_file": "voice_story.wav",
+      "style_prompt": "Gentle story voice, rhythmic and expressive, suitable for bedtime stories.",
+      "avoid": "Do not sound overly dramatic, childish, robotic, or like a commercial narrator."
+    },
+    {
+      "voice_id": "radio",
+      "display_name": "柔和电台音",
+      "reference_file": "voice_radio.wav",
+      "style_prompt": "Late-night radio style, warm, steady, companionable.",
+      "avoid": "Do not sound like a news anchor, advertisement, or energetic radio host."
+    },
+    {
+      "voice_id": "ocean_low",
+      "display_name": "低沉海洋音",
+      "reference_file": "voice_ocean.wav",
+      "style_prompt": "Low-frequency, slow, quiet, meditative, suitable for sleep and ambient guidance.",
+      "avoid": "Do not sound ominous, robotic, too dark, or hard to understand."
+    },
+    {
+      "voice_id": "bright",
+      "display_name": "明亮陪伴音",
+      "reference_file": "voice_bright.wav",
+      "style_prompt": "Bright, friendly, clear, lightly energetic, but not excited.",
+      "avoid": "Do not sound childish, overly excited, commercial, or sharp."
+    }
+  ]
+}

@@ -242,20 +242,12 @@ class MockFloppyRepository(
 
     override suspend fun getVoiceOptions(): List<VoiceOption> {
         delay(100)
-        return VoicePreference.entries.map { preference ->
-            VoiceOption(
-                id = preference.toBackendVoiceId(),
-                name = preference.label,
-                previewAudioUrl = fallbackAudio.streamUrl,
-                providerVoiceId = "minimax_${preference.toBackendVoiceId()}",
-                provider = "minimax"
-            )
-        }
+        return LocalVoiceOptions.all()
     }
 
     override suspend fun saveVoiceSelection(voiceId: String) {
         delay(120)
-        val selectedPreference = VoicePreference.entries.firstOrNull { it.toBackendVoiceId() == voiceId }
+        val selectedPreference = VoicePreference.entries.firstOrNull { LocalVoiceOptions.idFor(it) == voiceId }
             ?: return
         val nextProfile = settingsState.value.profile.copy(voicePreference = selectedPreference)
         settingsState.update { settings ->
@@ -383,15 +375,4 @@ class MockFloppyRepository(
         delay(600)
         return "我今晚想听一点放松的内容"
     }
-}
-
-private fun VoicePreference.toBackendVoiceId(): String = when (this) {
-    VoicePreference.WarmFemale -> "warm_female"
-    VoicePreference.CalmMale -> "warm_male"
-    VoicePreference.Neutral -> "neutral"
-    VoicePreference.Whisper -> "whisper"
-    VoicePreference.Story -> "storyteller_female"
-    VoicePreference.Radio -> "radio"
-    VoicePreference.Ocean -> "ocean_low"
-    VoicePreference.Bright -> "bright"
 }
