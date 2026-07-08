@@ -81,9 +81,11 @@ import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.gestures.snapping.rememberSnapFlingBehavior
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -106,11 +108,13 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
@@ -131,6 +135,7 @@ import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
@@ -175,6 +180,7 @@ import com.floppy.app.playback.PlaybackUiState
 import com.floppy.app.ui.video.Mp4VideoPlayer
 import com.floppy.app.ui.video.rememberRawMp4Uri
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import java.io.File
 import java.time.LocalDateTime
 import java.time.format.DateTimeFormatter
@@ -540,14 +546,31 @@ private fun AgeResearchPage(
     onSelected: (AgeRange) -> Unit
 ) {
     val ageOptions = AgeRange.entries.toList()
-    val selectedIndex = ageOptions.indexOf(selected).coerceAtLeast(0)
-    val ageListState = rememberLazyListState(
-        initialFirstVisibleItemIndex = (selectedIndex - 1).coerceAtLeast(0)
-    )
+    val itemHeight = 44.dp
+    val visibleCount = 5
+    val edgeCount = visibleCount / 2
 
-    LaunchedEffect(selected) {
-        val nextIndex = ageOptions.indexOf(selected).coerceAtLeast(0)
-        ageListState.animateScrollToItem((nextIndex - 1).coerceAtLeast(0))
+    val selectedIndex = ageOptions.indexOf(selected).coerceAtLeast(0)
+    val listState = rememberLazyListState(initialFirstVisibleItemIndex = selectedIndex)
+    val flingBehavior = rememberSnapFlingBehavior(lazyListState = listState)
+    val coroutineScope = rememberCoroutineScope()
+
+    // 滚动过程中，落在中间高亮带的词条即为当前选中项。
+    val centeredIndex by remember {
+        derivedStateOf {
+            val layoutInfo = listState.layoutInfo
+            val viewportCenter = (layoutInfo.viewportStartOffset + layoutInfo.viewportEndOffset) / 2f
+            layoutInfo.visibleItemsInfo.minByOrNull { info ->
+                kotlin.math.abs((info.offset + info.size / 2f) - viewportCenter)
+            }?.index ?: selectedIndex
+        }
+    }
+
+    // 将当前居中的词条同步回选中状态。
+    LaunchedEffect(centeredIndex) {
+        ageOptions.getOrNull(centeredIndex)?.let { option ->
+            if (option != selected) onSelected(option)
+        }
     }
 
     Column(verticalArrangement = Arrangement.spacedBy(26.dp)) {
@@ -555,34 +578,47 @@ private fun AgeResearchPage(
             title = "Hi~your gender",
             subtitle = "match more accurate content for you"
         )
-        LazyColumn(
-            state = ageListState,
+        Box(
             modifier = Modifier
                 .fillMaxWidth()
-                .height(196.dp)
+                .height(itemHeight * visibleCount)
                 .clip(RoundedCornerShape(12.dp))
                 .background(Color(0xFF111832).copy(alpha = 0.94f))
-                .padding(horizontal = 12.dp),
-            contentPadding = PaddingValues(vertical = 36.dp),
-            verticalArrangement = Arrangement.spacedBy(6.dp)
         ) {
-            items(ageOptions) { option ->
-                val isSelected = selected == option
-                Box(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .height(36.dp)
-                        .clip(RoundedCornerShape(8.dp))
-                        .background(if (isSelected) ResearchPurple else Color.Transparent)
-                        .clickable { onSelected(option) },
-                    contentAlignment = Alignment.Center
-                ) {
-                    Text(
-                        text = option.researchLabel(),
-                        color = if (isSelected) Color.White else Color(0xFF737A94).copy(alpha = if (option == AgeRange.Under18 || option == AgeRange.From45Plus) 0.35f else 0.82f),
-                        fontSize = 12.sp,
-                        fontWeight = if (isSelected) FontWeight.SemiBold else FontWeight.Normal
-                    )
+            // 中间高亮带，标识当前选中位置。
+            Box(
+                modifier = Modifier
+                    .align(Alignment.Center)
+                    .fillMaxWidth()
+                    .padding(horizontal = 12.dp)
+                    .height(itemHeight)
+                    .clip(RoundedCornerShape(8.dp))
+                    .background(ResearchPurple)
+            )
+            LazyColumn(
+                state = listState,
+                flingBehavior = flingBehavior,
+                modifier = Modifier.fillMaxSize(),
+                contentPadding = PaddingValues(vertical = itemHeight * edgeCount)
+            ) {
+                itemsIndexed(ageOptions) { index, option ->
+                    val isSelected = index == centeredIndex
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(itemHeight)
+                            .clickable {
+                                coroutineScope.launch { listState.animateScrollToItem(index) }
+                            },
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text(
+                            text = option.researchLabel(),
+                            color = if (isSelected) Color.White else Color(0xFF737A94).copy(alpha = 0.7f),
+                            fontSize = if (isSelected) 15.sp else 13.sp,
+                            fontWeight = if (isSelected) FontWeight.SemiBold else FontWeight.Normal
+                        )
+                    }
                 }
             }
         }

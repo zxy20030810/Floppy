@@ -34,6 +34,8 @@ import java.util.Locale
 import java.util.UUID
 
 private const val SpeechLogTag = "FloppySpeech"
+private const val GenerationPollTimeoutMillis = 12_000L
+private const val GenerationPollIntervalMillis = 500L
 
 data class ChatMessage(
     val body: String,
@@ -727,7 +729,8 @@ class FloppyViewModel(
             runCatching { repository.createGenerationTask(prompt, profile) }
                 .onSuccess { task ->
                     mutableState.update { it.copy(generationMessage = task.message) }
-                    repeat(8) {
+                    var elapsedMillis = 0L
+                    while (elapsedMillis < GenerationPollTimeoutMillis) {
                         val nextTask = repository.pollGenerationTask(task.id)
                         mutableState.update { it.copy(generationMessage = nextTask.message) }
                         when (nextTask.status) {
@@ -754,7 +757,10 @@ class FloppyViewModel(
                             }
 
                             GenerationStatus.Pending,
-                            GenerationStatus.Generating -> delay(350)
+                            GenerationStatus.Generating -> {
+                                delay(GenerationPollIntervalMillis)
+                                elapsedMillis += GenerationPollIntervalMillis
+                            }
                         }
                     }
                     mutableState.update {
