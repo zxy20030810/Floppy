@@ -8,6 +8,8 @@ import android.media.AudioRecord
 import android.media.AudioTrack
 import android.media.MediaRecorder
 import android.util.Log
+import com.floppy.app.domain.AudioItem
+import com.google.gson.Gson
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.Response
@@ -33,7 +35,7 @@ private const val PlaybackSampleRate = 24_000  // 下行：后端配置的 pcm_s
  */
 class RealtimeCallClient(
     private val okHttpClient: OkHttpClient,
-    baseUrl: String
+    private val baseUrl: String
 ) {
     private val callUrl = baseUrl.toCallWebSocketUrl("voice/realtime")
 
@@ -43,7 +45,10 @@ class RealtimeCallClient(
         onUserTranscript: (String, Boolean) -> Unit,
         onFloppyText: (String) -> Unit,
         onError: (String) -> Unit,
-        onEnded: () -> Unit
+        onEnded: () -> Unit,
+        onTtsEnd: () -> Unit = {},
+        onGenerationStarted: (String) -> Unit = {},
+        onGenerationDone: (AudioItem, String?, String?) -> Unit = { _, _, _ -> }
     ): RealtimeCallSession {
         val session = RealtimeCallSession(
             okHttpClient = okHttpClient,
@@ -52,7 +57,11 @@ class RealtimeCallClient(
             onUserTranscript = onUserTranscript,
             onFloppyText = onFloppyText,
             onError = onError,
-            onEnded = onEnded
+            onEnded = onEnded,
+            httpBaseUrl = baseUrl,
+            onTtsEnd = onTtsEnd,
+            onGenerationStarted = onGenerationStarted,
+            onGenerationDone = onGenerationDone
         )
         session.start()
         return session
@@ -66,7 +75,12 @@ class RealtimeCallSession(
     private val onUserTranscript: (String, Boolean) -> Unit,
     private val onFloppyText: (String) -> Unit,
     private val onError: (String) -> Unit,
-    private val onEnded: () -> Unit
+    private val onEnded: () -> Unit,
+    // 以下参数带默认值：老的构造调用无需改动
+    private val httpBaseUrl: String = "",
+    private val onTtsEnd: () -> Unit = {},
+    private val onGenerationStarted: (String) -> Unit = {},
+    private val onGenerationDone: (AudioItem, String?, String?) -> Unit = { _, _, _ -> }
 ) {
     private val isClosed = AtomicBoolean(false)
     private val isSessionReady = AtomicBoolean(false)
@@ -139,6 +153,42 @@ class RealtimeCallSession(
 
             "chat" -> message.optString("text").takeIf { it.isNotEmpty() }?.let(onFloppyText)
 
+            // Floppy 说完一轮话 = 回合边界，上层用它决定何时优雅挂断交接
+            "tts_end" -> onTtsEnd()
+
+            // 通话里触发了后台生成任务
+            "generation_started" -> onGenerationStarted(message.optString("jobId"))
+
+            // 后台生成完成：解析成品音频交给上层；解析失败只记日志不打断通话
+            "generation_done" -> runCatching {
+                val audio: AudioItem? = Gson().fromJson(
+                    message.getJSONObject("audio").toString(),
+                    AudioItem::class.java
+                )
+                requireNotNull(audio) { "generation_done missing audio" }
+                val notifyAudioUrl = if (message.isNull("notifyAudioUrl")) {
+                    null
+                } else {
+                    message.optString("notifyAudioUrl").takeIf { it.isNotBlank() }
+                }
+                val jobId = if (message.isNull("jobId")) {
+                    null
+                } else {
+                    message.optString("jobId").takeIf { it.isNotBlank() }
+                }
+                onGenerationDone(
+                    audio.copy(streamUrl = audio.streamUrl.toAbsoluteHttpUrl()),
+                    notifyAudioUrl?.toAbsoluteHttpUrl(),
+                    jobId
+                )
+            }.onFailure { Log.w(CallLogTag, "Ignoring malformed generation_done event", it) }
+
+            // 服务端主动收尾（对话自然结束）：按正常挂断处理，不当错误
+            "session_end" -> {
+                Log.d(CallLogTag, "Call server ended session")
+                finish()
+            }
+
             // 用户开口 → 立刻打断 Floppy 正在播的语音（barge-in）：
             // 换代号让播放线程丢掉写了一半的块，清队列，再冲掉 AudioTrack 里已缓冲的音频
             "asr_info" -> {
@@ -162,6 +212,15 @@ class RealtimeCallSession(
                 onError(message.optString("message", "通话服务异常"))
                 finish()
             }
+        }
+    }
+
+    /** WS 事件里的相对路径（/static/...）补全成完整 http 地址，播放器才认得 */
+    private fun String.toAbsoluteHttpUrl(): String {
+        return if (startsWith("/") && httpBaseUrl.isNotBlank()) {
+            httpBaseUrl.trimEnd('/') + this
+        } else {
+            this
         }
     }
 

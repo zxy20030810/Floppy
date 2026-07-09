@@ -95,7 +95,14 @@ class RemoteFloppyRepository(
     override suspend fun createGenerationTask(prompt: String, profile: UserProfile): GenerationTask =
         api.createGenerationTask(GenerationRequest(prompt, profile))
 
-    override suspend fun pollGenerationTask(taskId: String): GenerationTask = api.getGenerationTask(taskId)
+    override suspend fun pollGenerationTask(taskId: String): GenerationTask {
+        val task = api.getGenerationTask(taskId)
+        // 成品音频与"完成提示音"可能是相对路径，补全成完整地址才播得出来
+        return task.copy(
+            audio = task.audio?.withPlayableUrl(),
+            notifyAudioUrl = task.notifyAudioUrl?.absoluteBackendUrl()
+        )
+    }
 
     override suspend fun addToHistory(audio: AudioItem) {
         val reported = audio.withPlayableUrl()
@@ -236,7 +243,8 @@ class RemoteFloppyRepository(
             audio = fallbackAudio,
             asset = fallbackAudio,
             audioUrl = response.audioUrl?.absoluteBackendUrl(),
-            replyAudioUrl = response.replyAudioUrl?.absoluteBackendUrl()
+            replyAudioUrl = response.replyAudioUrl?.absoluteBackendUrl(),
+            notifyAudioUrl = response.notifyAudioUrl?.absoluteBackendUrl()
         )
     }
 

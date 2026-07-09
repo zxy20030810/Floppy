@@ -1,5 +1,7 @@
 package com.floppy.app.domain
 
+import com.google.gson.annotations.SerializedName
+
 enum class Gender {
     Female,
     Male,
@@ -161,7 +163,10 @@ data class GenerationTask(
     val id: String,
     val status: GenerationStatus,
     val message: String,
-    val audio: AudioItem? = null
+    val audio: AudioItem? = null,
+    // 生成完成后要先播的"提示音"；该模型经 Retrofit+Gson 直接反序列化，故需字段名注解
+    @SerializedName("notify_audio_url")
+    val notifyAudioUrl: String? = null
 )
 
 data class Feedback(

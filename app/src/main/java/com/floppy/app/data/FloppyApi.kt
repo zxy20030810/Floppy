@@ -308,6 +308,9 @@ data class TextIntentResponse(
     val turnIndex: Int? = null,
     @SerializedName("job_id")
     val jobId: String? = null,
+    // 异步生成的"完成提示音"（如：刚刚你想听的音频生成完成了，现在来听听吧）
+    @SerializedName("notify_audio_url")
+    val notifyAudioUrl: String? = null,
     val hit: Boolean? = null,
     @SerializedName("best_score")
     val bestScore: Double? = null,

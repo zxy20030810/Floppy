@@ -42,6 +42,9 @@ private const val GenerationPollTimeoutMillis = 90_000L
 private const val GenerationPollIntervalMillis = 500L
 private const val GenerationPollMaxConsecutiveFailures = 4
 private const val SpeechStopWatchdogMillis = 6_000L
+// 异步生成任务的后台追踪：3 秒一轮、最长 5 分钟（超时静默放弃，成品会进音频库）
+private const val GenerationTrackIntervalMillis = 3_000L
+private const val GenerationTrackTimeoutMillis = 5 * 60_000L
 
 data class ChatMessage(
     val body: String,
@@ -99,6 +102,12 @@ class FloppyViewModel(
     private var speechSessionCounter: Long = 0L
 
     private var generationJob: Job? = null
+
+    /** 后台异步生成任务的追踪协程 — 只追最新一单（新任务顶掉旧任务） */
+    private var generationTrackJob: Job? = null
+
+    /** 待播报的生成成品 <提示音URL, 音频>：只留最新一份，等空闲时机再播 */
+    private var pendingAnnouncement: Pair<String?, AudioItem>? = null
 
     // 只在播放错误「变化」时弹一次，避免用户关掉后又被无关的 combine 重新弹出来
     private var lastShownPlaybackError: String? = null
@@ -292,6 +301,8 @@ class FloppyViewModel(
         if (cleanTranscript != null) {
             submitTextIntent(cleanTranscript, TextIntentSources.Voice)
         }
+        // 没有转写结果 = 直接回到空闲，可能正好轮到播报生成成品
+        maybeAnnounce()
     }
 
     fun transcribeSpeechRecording(sessionId: Long, uri: Uri, fileName: String, mimeType: String?) {
@@ -332,6 +343,7 @@ class FloppyViewModel(
                             errorMessage = error.toUserFacingMessage("语音转文字失败，请再试一次或使用文字输入")
                         )
                     }
+                    maybeAnnounce()
                 }
         }
     }
@@ -433,12 +445,24 @@ class FloppyViewModel(
     /** 播放是被通话按下的暂停键 → 挂断后自动续播；手动播放/暂停会清掉这个标记 */
     private var pausedByCall = false
 
+    // 通话内后台生成的交接状态（都在主线程读写：WS 回调先 viewModelScope.launch 切回主线程）
+    /** Floppy 刚说完一轮话（tts_end 之后、用户再次开口之前）= 可优雅挂断的回合边界 */
+    private var callTurnComplete = false
+    /** 通话里创建、挂断时仍未完成的生成任务 → 挂断后转入后台轮询 */
+    private var callPendingJobId: String? = null
+    /** 通话里已完成的成品 <音频, 提示音URL, jobId> → 挂断后走播报路径自动接播 */
+    private var callHandoff: Triple<AudioItem, String?, String?>? = null
+
     fun startRealtimeCall() {
         val client = repository.realtimeCallClient ?: run {
             mutableState.update { it.copy(errorMessage = "当前模式不支持语音通话") }
             return
         }
         if (uiState.value.isInCall) return
+        // 先立 isInCall 标记：通话准备期间任何"空闲播报"（maybeAnnounce）都会被拦住
+        mutableState.update {
+            it.copy(isInCall = true, callStatus = "正在接通 Floppy…", callUserText = null, callFloppyText = null, errorMessage = null)
+        }
         // 通话独占声音通道：丢弃进行中的流式识别（不等 final，免得转写在通话中途
         // 变成一条文字意图打进来）、停掉语音回复播报和正在播的助眠音频
         cancelSpeechListening()
@@ -447,15 +471,19 @@ class FloppyViewModel(
         pausedByCall = playbackStateBeforeCall == PlaybackState.Playing ||
             playbackStateBeforeCall == PlaybackState.Buffering
         playbackController.pause()
-        mutableState.update {
-            it.copy(isInCall = true, callStatus = "正在接通 Floppy…", callUserText = null, callFloppyText = null, errorMessage = null)
-        }
+        callTurnComplete = false
+        callPendingJobId = null
+        callHandoff = null
         realtimeCallSession = client.start(
             userId = repository.userId,
             onReady = {
                 mutableState.update { it.copy(callStatus = "接通了，说点什么吧") }
             },
             onUserTranscript = { text, interim ->
+                if (interim) {
+                    // 用户又开口了 → 新的一轮开始，回合边界失效
+                    viewModelScope.launch { callTurnComplete = false }
+                }
                 mutableState.update {
                     if (!interim) it.copy(callUserText = text, callFloppyText = null, callStatus = null)
                     else it.copy(callUserText = text, callStatus = null)
@@ -471,18 +499,64 @@ class FloppyViewModel(
             onEnded = {
                 realtimeCallSession = null
                 mutableState.update { it.copy(isInCall = false, callStatus = null) }
-                // 回调可能来自 WS 线程，ExoPlayer 只能在主线程碰 → 切回主线程再续播
+                // 回调可能来自 WS 线程，ExoPlayer/MediaPlayer 只能在主线程碰 → 切回主线程再处理
                 viewModelScope.launch {
-                    if (pausedByCall) {
+                    val handoff = callHandoff
+                    val pendingJobId = callPendingJobId
+                    callHandoff = null
+                    callPendingJobId = null
+                    callTurnComplete = false
+                    if (handoff != null) {
+                        // 通话内做好的成品接管播放：跳过旧音频续播，也顶掉更早的待播报
                         pausedByCall = false
-                        if (uiState.value.playback.state == PlaybackState.Paused) {
-                            playbackController.resume()
-                            mutableState.update { it.copy(agentState = AgentState.Playing) }
+                        pendingAnnouncement = null
+                        val (audio, notifyUrl, _) = handoff
+                        mutableState.update { it.copy(activeAudio = audio, agentState = AgentState.Ready) }
+                        playReplyThenAudio(notifyUrl, audio)
+                    } else if (pendingJobId != null) {
+                        // 挂断时生成还没完 → 转入后台轮询，做好后按空闲时机播报
+                        trackGenerationJob(pendingJobId, null)
+                        maybeAnnounce()
+                    } else {
+                        // 若有待播报的成品，maybeAnnounce 会接管播放并清掉 pausedByCall（跳过续播）
+                        maybeAnnounce()
+                        if (pausedByCall) {
+                            pausedByCall = false
+                            if (uiState.value.playback.state == PlaybackState.Paused) {
+                                playbackController.resume()
+                                mutableState.update { it.copy(agentState = AgentState.Playing) }
+                            }
                         }
                     }
                 }
+            },
+            onTtsEnd = {
+                // Floppy 说完一轮话：若通话里已有成品，在这个回合边界优雅挂断交接
+                viewModelScope.launch {
+                    callTurnComplete = true
+                    maybeHandoffFromCall()
+                }
+            },
+            onGenerationStarted = { jobId ->
+                viewModelScope.launch {
+                    callPendingJobId = jobId.takeIf { it.isNotBlank() }
+                }
+            },
+            onGenerationDone = { audio, notifyUrl, jobId ->
+                viewModelScope.launch {
+                    callHandoff = Triple(audio, notifyUrl, jobId)
+                    callPendingJobId = null
+                    maybeHandoffFromCall()
+                }
             }
         )
+    }
+
+    /** 成品已就绪 + Floppy 刚说完一轮话 → 优雅挂断；成品在 onEnded 里接管播放 */
+    private fun maybeHandoffFromCall() {
+        if (callHandoff == null || !callTurnComplete || !uiState.value.isInCall) return
+        pausedByCall = false  // 挂断后不续播旧音频，直接播成品
+        realtimeCallSession?.hangUp()
     }
 
     fun stopRealtimeCall() {
@@ -512,6 +586,7 @@ class FloppyViewModel(
                 }
             )
         }
+        maybeAnnounce()
     }
 
     fun failSpeechListening(sessionId: Long, message: String) {
@@ -531,6 +606,7 @@ class FloppyViewModel(
                 errorMessage = message.toUserFacingMessage()
             )
         }
+        maybeAnnounce()
     }
 
     fun denySpeechPermission() {
@@ -792,6 +868,10 @@ class FloppyViewModel(
                     // Floppy 先用语音念回复（若有），说完自动接播新音频；
                     // 拿到新音频却继续放旧音频是不合逻辑的 —— 新意图接管播放。
                     playReplyThenAudio(response.replyAudioUrl, audio)
+                    // 异步生成：先播"承诺"回复继续聊天，后台追踪任务，做好后空闲时机播报
+                    if (response.action == TextIntentActions.GenerateJob && response.jobId != null) {
+                        trackGenerationJob(response.jobId, response.notifyAudioUrl)
+                    }
                 }
                 .onFailure { error ->
                     if (!isActiveTextIntent(requestId, turnIndex)) {
@@ -807,6 +887,8 @@ class FloppyViewModel(
                         )
                     }
                 }
+            // 一次对话回合结束（无论成败）都是潜在的空闲时机
+            maybeAnnounce()
         }
     }
 
@@ -974,6 +1056,78 @@ class FloppyViewModel(
                     }
                 }
         }
+    }
+
+    // --- 异步生成：后台追踪 + 空闲时机播报 ---
+
+    /** 后台轮询异步生成任务（不动 agentState，用户可继续聊天）；新任务顶掉旧任务 */
+    private fun trackGenerationJob(jobId: String, notifyAudioUrlHint: String?) {
+        generationTrackJob?.cancel()
+        generationTrackJob = viewModelScope.launch {
+            var elapsedMillis = 0L
+            var consecutivePollFailures = 0
+            while (elapsedMillis < GenerationTrackTimeoutMillis) {
+                delay(GenerationTrackIntervalMillis)
+                elapsedMillis += GenerationTrackIntervalMillis
+                // 单次轮询失败不炸：容忍几次网络抖动，连续失败才放弃（成品反正会进音频库）
+                val task = runCatching { repository.pollGenerationTask(jobId) }
+                    .onFailure { Log.w(ViewModelLogTag, "Generation job poll failed", it) }
+                    .getOrNull()
+                if (task == null) {
+                    consecutivePollFailures += 1
+                    if (consecutivePollFailures >= GenerationPollMaxConsecutiveFailures) return@launch
+                    continue
+                }
+                consecutivePollFailures = 0
+                when (task.status) {
+                    GenerationStatus.Success -> {
+                        task.audio?.let { audio ->
+                            enqueueAnnouncement(task.notifyAudioUrl ?: notifyAudioUrlHint, audio)
+                        }
+                        return@launch
+                    }
+
+                    GenerationStatus.Failed -> {
+                        mutableState.update {
+                            it.copy(errorMessage = "刚才的音频没做成功，要不换个说法再试试？")
+                        }
+                        return@launch
+                    }
+
+                    GenerationStatus.Pending,
+                    GenerationStatus.Generating -> Unit
+                }
+            }
+            // 超时静默放弃：不打扰用户，成品做好后会出现在音频库里
+        }
+    }
+
+    /** 记下待播报的成品（只留最新一份），并尝试立刻播报 */
+    private fun enqueueAnnouncement(notifyUrl: String?, audio: AudioItem) {
+        pendingAnnouncement = notifyUrl to audio
+        maybeAnnounce()
+    }
+
+    /** 空闲时机（没在听、没在等回复、不在通话中）才播报：先放提示音，再自动接播成品。
+     *  在各个"忙碌标记转为 false"的地方都可以廉价地调一下 —— 内部有幂等门槛。 */
+    private fun maybeAnnounce() {
+        val (notifyUrl, audio) = pendingAnnouncement ?: return
+        val state = uiState.value
+        if (state.isListening || state.isSubmittingTextIntent || state.isSubmittingVoiceIntent || state.isInCall) return
+        pendingAnnouncement = null
+        pausedByCall = false  // 播报接管播放，通话残留的续播标记作废
+        mutableState.update {
+            it.copy(
+                chatMessages = it.chatMessages + ChatMessage(
+                    body = "你想听的《${audio.title}》做好了，现在放给你听～",
+                    outgoing = false,
+                    audio = audio
+                ),
+                activeAudio = audio,
+                agentState = AgentState.Ready
+            )
+        }
+        playReplyThenAudio(notifyUrl, audio)
     }
 
     private fun deriveAgentState(current: AgentState, playback: PlaybackUiState): AgentState {
