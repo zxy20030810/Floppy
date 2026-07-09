@@ -42,7 +42,8 @@ class RemoteFloppyRepository(
     context: Context,
     private val api: FloppyApi,
     override val streamingSpeechClient: StreamingSpeechClient?,
-    private val userId: String,
+    override val realtimeCallClient: RealtimeCallClient? = null,
+    override val userId: String,
     private val baseUrl: String,
     initialProfile: UserProfile? = null,
     private val onProfileSaved: ((UserProfile) -> Unit)? = null
@@ -234,7 +235,8 @@ class RemoteFloppyRepository(
         return response.copy(
             audio = fallbackAudio,
             asset = fallbackAudio,
-            audioUrl = response.audioUrl?.absoluteBackendUrl()
+            audioUrl = response.audioUrl?.absoluteBackendUrl(),
+            replyAudioUrl = response.replyAudioUrl?.absoluteBackendUrl()
         )
     }
 

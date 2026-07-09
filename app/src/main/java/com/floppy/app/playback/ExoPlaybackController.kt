@@ -2,6 +2,8 @@ package com.floppy.app.playback
 
 import android.content.Context
 import android.net.Uri
+import android.util.Log
+import androidx.media3.common.C
 import androidx.media3.common.MediaItem
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
@@ -10,6 +12,7 @@ import com.floppy.app.domain.AudioItem
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -20,8 +23,26 @@ import kotlinx.coroutines.launch
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 
 class ExoPlaybackController(context: Context) : PlaybackController {
+
+    companion object {
+        private const val LogTag = "FloppyPlayback"
+
+        @Volatile
+        private var sharedInstance: ExoPlaybackController? = null
+
+        /** 进程内单例：旋转重建 Activity 时复用同一个播放器，避免泄漏孤儿 ExoPlayer */
+        fun shared(context: Context): ExoPlaybackController {
+            return sharedInstance ?: synchronized(this) {
+                sharedInstance ?: ExoPlaybackController(context.applicationContext)
+                    .also { sharedInstance = it }
+            }
+        }
+    }
+
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
-    private val player = ExoPlayer.Builder(context.applicationContext).build()
+    private val player = ExoPlayer.Builder(context.applicationContext)
+        .setWakeMode(C.WAKE_MODE_NETWORK)  // 锁屏后继续播放（需 manifest WAKE_LOCK 权限）
+        .build()
     private val playbackState = MutableStateFlow(PlaybackUiState())
 
     override val playback: StateFlow<PlaybackUiState> = playbackState.asStateFlow()
@@ -50,11 +71,18 @@ class ExoPlaybackController(context: Context) : PlaybackController {
 
                 override fun onIsPlayingChanged(isPlaying: Boolean) {
                     playbackState.update {
-                        it.copy(state = if (isPlaying) PlaybackState.Playing else PlaybackState.Paused)
+                        val nextState = when {
+                            isPlaying -> PlaybackState.Playing
+                            // 自然播完时 isPlaying 也会变 false，别把 Ended 盖成 Paused
+                            player.playbackState == Player.STATE_ENDED -> PlaybackState.Ended
+                            else -> PlaybackState.Paused
+                        }
+                        it.copy(state = nextState)
                     }
                 }
 
                 override fun onPlayerError(error: PlaybackException) {
+                    Log.w(LogTag, "ExoPlayer error", error)
                     playbackState.update {
                         it.copy(
                             state = PlaybackState.Failed,
@@ -97,8 +125,12 @@ class ExoPlaybackController(context: Context) : PlaybackController {
 
     override fun resume() {
         if (currentAudio != null) {
+            // 播完后 ExoPlayer 停在 STATE_ENDED，此时 play() 是空操作 —— 先回到开头再播（重播）
+            if (player.playbackState == Player.STATE_ENDED) {
+                player.seekTo(0)
+            }
             player.play()
-            playbackState.update { it.copy(state = PlaybackState.Playing) }
+            playbackState.update { it.copy(state = PlaybackState.Playing, positionMs = player.currentPosition.coerceAtLeast(0)) }
         }
     }
 
@@ -108,6 +140,12 @@ class ExoPlaybackController(context: Context) : PlaybackController {
     }
 
     override fun release() {
+        synchronized(Companion) {
+            if (sharedInstance === this) {
+                sharedInstance = null
+            }
+        }
+        scope.cancel()
         player.release()
     }
 

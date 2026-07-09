@@ -76,7 +76,8 @@ class StreamingSpeechSession(
                 }
 
                 override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
-                    if (isClosed.get() || (isStopping.get() && t.isExpectedStopClose())) {
+                    // stop() 之后的任何断开都算正常收尾（服务端处理完就关，不必匹配特定文案）
+                    if (isClosed.get() || isStopping.get()) {
                         Log.d(SpeechLogTag, "Streaming speech socket closed after stop", t)
                         onFinal("")
                         finishSession()
@@ -221,10 +222,6 @@ class StreamingSpeechSession(
             .put("channels", 1)
             .toString()
     }
-}
-
-private fun Throwable.isExpectedStopClose(): Boolean {
-    return message?.trim()?.equals("connection closed", ignoreCase = true) == true
 }
 
 private fun String.toWebSocketUrl(path: String): String {

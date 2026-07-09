@@ -288,6 +288,8 @@ data class TextIntentRequest(
     val clientRequestId: String? = null,
     val turnIndex: Int? = null,
     val supersedesRequestId: String? = null,
+    @SerializedName("current_asset_id")
+    val currentAssetId: String? = null,
     @SerializedName("user_id")
     val userId: String? = null
 )
@@ -295,6 +297,7 @@ data class TextIntentRequest(
 data class TextIntentResponse(
     val action: String? = null,
     val reply: String = "",
+    val replyAudioUrl: String? = null,
     val audio: AudioItem? = null,
     @SerializedName("asset")
     val asset: AudioItem? = null,

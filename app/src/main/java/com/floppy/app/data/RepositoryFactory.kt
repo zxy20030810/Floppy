@@ -21,6 +21,8 @@ object RepositoryFactory {
             .connectTimeout(10, TimeUnit.SECONDS)
             .readTimeout(60, TimeUnit.SECONDS)
             .writeTimeout(30, TimeUnit.SECONDS)
+            // WebSocket 心跳：死链（通话/流式识别）能被及时发现，而不是永远挂着
+            .pingInterval(15, TimeUnit.SECONDS)
             .addInterceptor(logging)
             .build()
         val api = Retrofit.Builder()
@@ -30,6 +32,7 @@ object RepositoryFactory {
             .build()
             .create(FloppyApi::class.java)
         val streamingSpeechClient = StreamingSpeechClient(client, BuildConfig.API_BASE_URL)
+        val realtimeCallClient = RealtimeCallClient(client, BuildConfig.API_BASE_URL)
 
         if (BuildConfig.USE_MOCK_API) {
             return MockFloppyRepository(
@@ -43,6 +46,7 @@ object RepositoryFactory {
             context = context.applicationContext,
             api = api,
             streamingSpeechClient = streamingSpeechClient,
+            realtimeCallClient = realtimeCallClient,
             userId = userId,
             baseUrl = BuildConfig.API_BASE_URL,
             initialProfile = savedProfile,

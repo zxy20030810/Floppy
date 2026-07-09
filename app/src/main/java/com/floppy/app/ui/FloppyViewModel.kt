@@ -9,6 +9,8 @@ import com.floppy.app.data.FloppyRepository
 import com.floppy.app.data.TextIntentActions
 import com.floppy.app.data.TextIntentRequest
 import com.floppy.app.data.TextIntentSources
+import android.media.MediaPlayer
+import com.floppy.app.data.RealtimeCallSession
 import com.floppy.app.data.StreamingSpeechSession
 import com.floppy.app.domain.AgentState
 import com.floppy.app.domain.AppSettings
@@ -35,8 +37,11 @@ import java.util.Locale
 import java.util.UUID
 
 private const val SpeechLogTag = "FloppySpeech"
-private const val GenerationPollTimeoutMillis = 12_000L
+private const val ViewModelLogTag = "FloppyViewModel"
+private const val GenerationPollTimeoutMillis = 90_000L
 private const val GenerationPollIntervalMillis = 500L
+private const val GenerationPollMaxConsecutiveFailures = 4
+private const val SpeechStopWatchdogMillis = 6_000L
 
 data class ChatMessage(
     val body: String,
@@ -69,7 +74,12 @@ data class FloppyUiState(
     val voiceOptions: List<VoiceOption> = emptyList(),
     val isLoadingVoiceOptions: Boolean = false,
     val isSavingVoiceSelection: Boolean = false,
-    val selectedVoiceId: String? = null
+    val selectedVoiceId: String? = null,
+    // 「和 Floppy 打电话」（豆包端到端实时语音）
+    val isInCall: Boolean = false,
+    val callStatus: String? = null,
+    val callUserText: String? = null,
+    val callFloppyText: String? = null
 ) {
     val hasProfile: Boolean = profile != null
     val currentVoiceTranscript: String? = voicePartialTranscript ?: voiceTranscript
@@ -90,6 +100,9 @@ class FloppyViewModel(
 
     private var generationJob: Job? = null
 
+    // 只在播放错误「变化」时弹一次，避免用户关掉后又被无关的 combine 重新弹出来
+    private var lastShownPlaybackError: String? = null
+
     init {
         viewModelScope.launch {
             combine(
@@ -98,6 +111,8 @@ class FloppyViewModel(
                 repository.library,
                 playbackController.playback
             ) { profile, settings, library, playback ->
+                val playbackErrorChanged = playback.errorMessage != lastShownPlaybackError
+                lastShownPlaybackError = playback.errorMessage
                 mutableState.value.copy(
                     profile = profile,
                     settings = settings,
@@ -105,7 +120,11 @@ class FloppyViewModel(
                     playback = playback,
                     agentState = deriveAgentState(mutableState.value.agentState, playback),
                     activeAudio = playback.currentAudio ?: mutableState.value.activeAudio,
-                    errorMessage = playback.errorMessage.toUserFacingMessage() ?: mutableState.value.errorMessage
+                    errorMessage = if (playbackErrorChanged) {
+                        playback.errorMessage.toUserFacingMessage() ?: mutableState.value.errorMessage
+                    } else {
+                        mutableState.value.errorMessage
+                    }
                 )
             }.collect { next ->
                 mutableState.value = next
@@ -202,6 +221,9 @@ class FloppyViewModel(
 
     fun startSpeechListening(): Long {
         val sessionId = nextSpeechSessionId()
+        // 用户开口对话 = 打断：正在播的音频立刻暂停（否则旧音频继续响，
+        // 还会被麦克风录进去当成用户说的话）
+        pausePlaybackForDialog()
         mutableState.update {
             it.copy(
                 isListening = true,
@@ -377,18 +399,94 @@ class FloppyViewModel(
         }.isSuccess
     }
 
+    private var speechStopWatchdogJob: Job? = null
+
     fun stopStreamingSpeech() {
-        streamingSpeechSession?.stop()
-        if (streamingSpeechSession != null) {
-            mutableState.update {
-                it.copy(
-                    isListening = false,
-                    agentState = AgentState.Idle,
-                    isSubmittingVoiceIntent = true,
-                    generationMessage = "Floppy 正在理解你说的话"
-                )
-            }
+        val session = streamingSpeechSession ?: return
+        session.stop()
+        val sessionId = activeSpeechSessionId
+        mutableState.update {
+            it.copy(
+                isListening = false,
+                agentState = AgentState.Idle,
+                isSubmittingVoiceIntent = true,
+                generationMessage = "Floppy 正在理解你说的话"
+            )
         }
+        // 看门狗：服务端一直不回 final 时，用最后的 partial 兜底提交，别让 UI 永远卡在"正在理解"
+        speechStopWatchdogJob?.cancel()
+        speechStopWatchdogJob = viewModelScope.launch {
+            delay(SpeechStopWatchdogMillis)
+            if (sessionId == null || !isActiveSpeechSession(sessionId)) return@launch
+            Log.w(SpeechLogTag, "Streaming ASR final timed out; falling back to last partial")
+            streamingSpeechSession?.cancel()
+            streamingSpeechSession = null
+            // completeSpeechListening 会 clearSpeechSession → 迟到的真 final 因会话失效被忽略
+            completeSpeechListening(sessionId, mutableState.value.voicePartialTranscript)
+        }
+    }
+
+    // --- 「和 Floppy 打电话」（豆包端到端实时语音，纯陪聊） ---
+
+    private var realtimeCallSession: RealtimeCallSession? = null
+
+    /** 播放是被通话按下的暂停键 → 挂断后自动续播；手动播放/暂停会清掉这个标记 */
+    private var pausedByCall = false
+
+    fun startRealtimeCall() {
+        val client = repository.realtimeCallClient ?: run {
+            mutableState.update { it.copy(errorMessage = "当前模式不支持语音通话") }
+            return
+        }
+        if (uiState.value.isInCall) return
+        // 通话独占声音通道：丢弃进行中的流式识别（不等 final，免得转写在通话中途
+        // 变成一条文字意图打进来）、停掉语音回复播报和正在播的助眠音频
+        cancelSpeechListening()
+        releaseReplyPlayer()
+        val playbackStateBeforeCall = uiState.value.playback.state
+        pausedByCall = playbackStateBeforeCall == PlaybackState.Playing ||
+            playbackStateBeforeCall == PlaybackState.Buffering
+        playbackController.pause()
+        mutableState.update {
+            it.copy(isInCall = true, callStatus = "正在接通 Floppy…", callUserText = null, callFloppyText = null, errorMessage = null)
+        }
+        realtimeCallSession = client.start(
+            userId = repository.userId,
+            onReady = {
+                mutableState.update { it.copy(callStatus = "接通了，说点什么吧") }
+            },
+            onUserTranscript = { text, interim ->
+                mutableState.update {
+                    if (!interim) it.copy(callUserText = text, callFloppyText = null, callStatus = null)
+                    else it.copy(callUserText = text, callStatus = null)
+                }
+            },
+            onFloppyText = { chunk ->
+                mutableState.update { it.copy(callFloppyText = ((it.callFloppyText ?: "") + chunk).takeLast(160)) }
+            },
+            onError = { message ->
+                Log.w(ViewModelLogTag, "Realtime call error: $message")
+                mutableState.update { it.copy(errorMessage = "通话连接失败，请稍后再试") }
+            },
+            onEnded = {
+                realtimeCallSession = null
+                mutableState.update { it.copy(isInCall = false, callStatus = null) }
+                // 回调可能来自 WS 线程，ExoPlayer 只能在主线程碰 → 切回主线程再续播
+                viewModelScope.launch {
+                    if (pausedByCall) {
+                        pausedByCall = false
+                        if (uiState.value.playback.state == PlaybackState.Paused) {
+                            playbackController.resume()
+                            mutableState.update { it.copy(agentState = AgentState.Playing) }
+                        }
+                    }
+                }
+            }
+        )
+    }
+
+    fun stopRealtimeCall() {
+        realtimeCallSession?.hangUp()
     }
 
     fun cancelSpeechListening() {
@@ -488,11 +586,66 @@ class FloppyViewModel(
         createAndPollGeneration(prompt, profile)
     }
 
+    /** 对话开始（开麦/新意图）时暂停正在播的音频 — 打断语义 + 防回声。
+     *  同时打断 Floppy 正在念的语音回复（用户开口 = 一切让路）。 */
+    private fun pausePlaybackForDialog() {
+        releaseReplyPlayer()
+        val state = uiState.value.playback.state
+        if (state == PlaybackState.Playing || state == PlaybackState.Buffering) {
+            playbackController.pause()
+            mutableState.update { it.copy(agentState = AgentState.Paused) }
+        }
+    }
+
+    // --- Floppy 语音回复（replyAudioUrl）播放，播完接主音频 ---
+
+    private var replyPlayer: MediaPlayer? = null
+
+    private fun playReplyThenAudio(replyAudioUrl: String?, audio: AudioItem?) {
+        if (uiState.value.isInCall) {
+            // 通话中不抢声道：不念回复也不放音频。
+            // activeAudio 已由调用方（submitTextIntent onSuccess）记录，挂断后可手动播放
+            return
+        }
+        releaseReplyPlayer()
+        if (replyAudioUrl.isNullOrBlank()) {
+            audio?.let { play(it) }
+            return
+        }
+        pausePlaybackForDialog()  // Floppy 说话时不和背景音频抢声道
+        val player = MediaPlayer()
+        replyPlayer = player
+        runCatching {
+            player.setDataSource(replyAudioUrl)
+            player.setOnPreparedListener { it.start() }
+            player.setOnCompletionListener {
+                releaseReplyPlayer()
+                audio?.let { next -> play(next) }
+            }
+            player.setOnErrorListener { _, _, _ ->
+                releaseReplyPlayer()
+                audio?.let { next -> play(next) }
+                true
+            }
+            player.prepareAsync()
+        }.onFailure {
+            releaseReplyPlayer()
+            audio?.let { next -> play(next) }
+        }
+    }
+
+    private fun releaseReplyPlayer() {
+        replyPlayer?.let { runCatching { it.release() } }
+        replyPlayer = null
+    }
+
     fun play(audio: AudioItem) {
         if (audio.streamUrl.isBlank()) {
             mutableState.update { it.copy(errorMessage = "这个音频暂时没有可播放地址") }
             return
         }
+        releaseReplyPlayer()  // 手动点播时停掉正在念的语音回复，避免两路声音叠着
+        pausedByCall = false  // 手动操作接管播放，通话挂断后不再自动续播
         playbackController.play(audio)
         viewModelScope.launch {
             repository.addToHistory(audio)
@@ -508,6 +661,7 @@ class FloppyViewModel(
     }
 
     fun pauseOrResume() {
+        pausedByCall = false  // 手动播放/暂停后，通话结束不再自动续播
         when (uiState.value.playback.state) {
             PlaybackState.Playing, PlaybackState.Buffering -> {
                 playbackController.pause()
@@ -525,6 +679,7 @@ class FloppyViewModel(
                     if (shouldPlayFresh) {
                         play(audio)
                     } else {
+                        releaseReplyPlayer()  // 续播前掐掉 Floppy 正在念的语音回复，避免两路声音叠着
                         playbackController.resume()
                         mutableState.update { it.copy(agentState = AgentState.Playing) }
                     }
@@ -578,6 +733,17 @@ class FloppyViewModel(
                 )
             }
 
+            // 支持"remix 当前这条音频"类意图：把正在播/刚暂停的音频 id 带给后端
+            val playbackSnapshot = mutableState.value.playback
+            val currentAssetId = if (
+                playbackSnapshot.state == PlaybackState.Playing ||
+                playbackSnapshot.state == PlaybackState.Paused
+            ) {
+                (playbackSnapshot.currentAudio ?: mutableState.value.activeAudio)?.id
+            } else {
+                null
+            }
+
             val request = TextIntentRequest(
                 text = cleanText,
                 source = source,
@@ -586,7 +752,8 @@ class FloppyViewModel(
                 conversationId = conversationId,
                 clientRequestId = requestId,
                 turnIndex = turnIndex,
-                supersedesRequestId = previousRequestId
+                supersedesRequestId = previousRequestId,
+                currentAssetId = currentAssetId
             )
 
             runCatching { repository.submitTextIntent(request) }
@@ -622,6 +789,9 @@ class FloppyViewModel(
                             feedbackMessage = if (source == TextIntentSources.Voice) "已把语音内容交给 Floppy" else null
                         )
                     }
+                    // Floppy 先用语音念回复（若有），说完自动接播新音频；
+                    // 拿到新音频却继续放旧音频是不合逻辑的 —— 新意图接管播放。
+                    playReplyThenAudio(response.replyAudioUrl, audio)
                 }
                 .onFailure { error ->
                     if (!isActiveTextIntent(requestId, turnIndex)) {
@@ -731,8 +901,29 @@ class FloppyViewModel(
                 .onSuccess { task ->
                     mutableState.update { it.copy(generationMessage = task.message) }
                     var elapsedMillis = 0L
+                    var consecutivePollFailures = 0
                     while (elapsedMillis < GenerationPollTimeoutMillis) {
-                        val nextTask = repository.pollGenerationTask(task.id)
+                        // 单次轮询失败不炸进程：容忍几次网络抖动，连续失败才放弃
+                        val nextTask = runCatching { repository.pollGenerationTask(task.id) }
+                            .onFailure { Log.w(ViewModelLogTag, "Generation poll failed", it) }
+                            .getOrNull()
+                        if (nextTask == null) {
+                            consecutivePollFailures += 1
+                            if (consecutivePollFailures >= GenerationPollMaxConsecutiveFailures) {
+                                mutableState.update {
+                                    it.copy(
+                                        agentState = AgentState.Failed,
+                                        generationMessage = null,
+                                        errorMessage = "生成进度查询失败，请稍后再试"
+                                    )
+                                }
+                                return@launch
+                            }
+                            delay(GenerationPollIntervalMillis)
+                            elapsedMillis += GenerationPollIntervalMillis
+                            continue
+                        }
+                        consecutivePollFailures = 0
                         mutableState.update { it.copy(generationMessage = nextTask.message) }
                         when (nextTask.status) {
                             GenerationStatus.Success -> {
@@ -797,6 +988,8 @@ class FloppyViewModel(
 
     override fun onCleared() {
         stopStreamingSpeech()
+        realtimeCallSession?.hangUp()
+        releaseReplyPlayer()
         playbackController.release()
     }
 
@@ -811,15 +1004,10 @@ class FloppyViewModel(
     }
 }
 
-private fun Throwable.toUserFacingMessage(fallback: String): String? {
-    val cleanMessage = message?.trim()
-    return when {
-        cleanMessage.isNullOrEmpty() -> fallback
-        cleanMessage.isHiddenTransientMessage() -> null
-        this is IOException -> fallback
-        cleanMessage.isTechnicalFailureMessage() -> fallback
-        else -> cleanMessage
-    }
+/** 用户永远只看到友好的中文文案；原始异常进日志排查用 */
+private fun Throwable.toUserFacingMessage(fallback: String): String {
+    Log.w(ViewModelLogTag, "Operation failed: $message", this)
+    return fallback
 }
 
 private fun String?.toUserFacingMessage(): String? {

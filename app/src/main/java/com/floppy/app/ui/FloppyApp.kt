@@ -246,6 +246,7 @@ fun FloppyApp(viewModel: FloppyViewModel) {
             }
 
             else -> {
+                Box(modifier = Modifier.fillMaxSize()) {
                 MainShell(
                 state = state,
                 snackbarHostState = snackbarHostState,
@@ -270,6 +271,128 @@ fun FloppyApp(viewModel: FloppyViewModel) {
                 onRefreshVoiceOptions = viewModel::refreshVoiceOptions,
                 onSaveVoiceSelection = viewModel::saveVoiceSelection
             )
+                FloppyCallOverlay(
+                    isInCall = state.isInCall,
+                    callStatus = state.callStatus,
+                    callUserText = state.callUserText,
+                    callFloppyText = state.callFloppyText,
+                    snackbarHostState = snackbarHostState,
+                    onStartCall = viewModel::startRealtimeCall,
+                    onHangUp = viewModel::stopRealtimeCall
+                )
+                }
+            }
+        }
+    }
+}
+
+/**
+ * 「和 Floppy 打电话」— 右下角悬浮入口 + 通话全屏浮层（豆包端到端实时语音）。
+ */
+@Composable
+private fun FloppyCallOverlay(
+    isInCall: Boolean,
+    callStatus: String?,
+    callUserText: String?,
+    callFloppyText: String?,
+    snackbarHostState: SnackbarHostState,
+    onStartCall: () -> Unit,
+    onHangUp: () -> Unit
+) {
+    val context = LocalContext.current
+    val coroutineScope = rememberCoroutineScope()
+    val permissionLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestPermission()
+    ) { granted ->
+        if (granted) {
+            onStartCall()
+        } else {
+            // 和首页狗狗的拒权路径一样用 snackbar 提示，不再静默无反应
+            coroutineScope.launch {
+                snackbarHostState.showSnackbar("需要麦克风权限才能和 Floppy 通话")
+            }
+        }
+    }
+
+    if (!isInCall) {
+        Box(modifier = Modifier.fillMaxSize()) {
+            Box(
+                modifier = Modifier
+                    .align(Alignment.BottomEnd)
+                    .padding(end = 20.dp, bottom = 132.dp)
+                    .size(56.dp)
+                    .background(Color(0xFF7D6BFF), CircleShape)
+                    .clickable {
+                        if (ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) ==
+                            PackageManager.PERMISSION_GRANTED
+                        ) {
+                            onStartCall()
+                        } else {
+                            permissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
+                        }
+                    },
+                contentAlignment = Alignment.Center
+            ) {
+                Text(text = "📞", fontSize = 24.sp)
+            }
+        }
+        return
+    }
+
+    // 通话中按返回键 = 挂断，而不是直接退出 app
+    BackHandler(onBack = onHangUp)
+
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(Color(0xE6060B1C))
+            .clickable(enabled = false) {},
+        contentAlignment = Alignment.Center
+    ) {
+        Column(
+            horizontalAlignment = Alignment.CenterHorizontally,
+            modifier = Modifier.padding(horizontal = 32.dp)
+        ) {
+            Text(text = "🌙", fontSize = 56.sp)
+            Spacer(modifier = Modifier.size(16.dp))
+            Text(
+                text = "正在和 Floppy 通话",
+                color = Color.White,
+                fontSize = 20.sp,
+                fontWeight = FontWeight.SemiBold
+            )
+            Spacer(modifier = Modifier.size(12.dp))
+            Text(
+                text = callStatus ?: "",
+                color = Color(0xFF9BA3C7),
+                fontSize = 14.sp,
+                textAlign = TextAlign.Center
+            )
+            callUserText?.takeIf { it.isNotBlank() }?.let {
+                Spacer(modifier = Modifier.size(20.dp))
+                Text(
+                    text = "你：$it",
+                    color = Color(0xFF9BA3C7),
+                    fontSize = 15.sp,
+                    textAlign = TextAlign.Center
+                )
+            }
+            callFloppyText?.takeIf { it.isNotBlank() }?.let {
+                Spacer(modifier = Modifier.size(12.dp))
+                Text(
+                    text = "Floppy：$it",
+                    color = Color.White,
+                    fontSize = 16.sp,
+                    textAlign = TextAlign.Center
+                )
+            }
+            Spacer(modifier = Modifier.size(40.dp))
+            Button(
+                onClick = onHangUp,
+                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFE5484D)),
+                shape = RoundedCornerShape(28.dp)
+            ) {
+                Text(text = "挂断", color = Color.White, fontSize = 16.sp)
             }
         }
     }
@@ -1046,9 +1169,11 @@ private fun ChatScreen(
     var input by rememberSaveable { mutableStateOf("") }
     val listState = rememberLazyListState()
 
-    LaunchedEffect(messages.size) {
-        if (messages.isNotEmpty()) {
-            listState.animateScrollToItem(messages.lastIndex)
+    LaunchedEffect(messages.size, isSending) {
+        // 发送中会在列表尾部多渲染一个「正在输入」占位气泡
+        val totalItems = messages.size + if (isSending) 1 else 0
+        if (totalItems > 0) {
+            listState.animateScrollToItem(totalItems - 1)
         }
     }
 
@@ -1086,6 +1211,12 @@ private fun ChatScreen(
                         onPauseOrResume = onPauseOrResume
                     )
                 }
+                if (isSending) {
+                    // 仅渲染态的占位气泡，不写入持久消息列表
+                    item {
+                        ChatTypingIndicatorRow()
+                    }
+                }
             }
             ChatInputBar(
                 value = input,
@@ -1097,7 +1228,7 @@ private fun ChatScreen(
                         input = ""
                     }
                 },
-                enabled = !isSending,
+                sendEnabled = !isSending,
                 modifier = Modifier
                     .fillMaxWidth()
                     .padding(horizontal = 31.dp)
@@ -1201,6 +1332,61 @@ private fun ChatMessageRow(
             onPlayAudio = onPlayAudio,
             onPauseOrResume = onPauseOrResume
         )
+    }
+}
+
+/** 等待 Floppy 回复时的「正在输入」占位气泡（仅渲染态，不进消息列表）。 */
+@Composable
+private fun ChatTypingIndicatorRow() {
+    val shape = RoundedCornerShape(20.dp)
+    val transition = rememberInfiniteTransition(label = "chat-typing")
+    val phase by transition.animateFloat(
+        initialValue = 0f,
+        targetValue = 3f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(durationMillis = 1200, easing = LinearEasing),
+            repeatMode = RepeatMode.Restart
+        ),
+        label = "chat-typing-phase"
+    )
+
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.Start,
+        verticalAlignment = Alignment.Top
+    ) {
+        ChatAvatar()
+        Spacer(modifier = Modifier.width(9.dp))
+        Row(
+            modifier = Modifier
+                .widthIn(max = 292.dp)
+                .clip(shape)
+                .background(Color(0xFF202844).copy(alpha = 0.96f))
+                .border(1.dp, Color(0xFF354162), shape)
+                .padding(horizontal = 20.dp, vertical = 16.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(4.dp)
+        ) {
+            Text(
+                text = "Floppy 正在为你准备",
+                color = Color.White.copy(alpha = 0.85f),
+                fontSize = 16.sp,
+                lineHeight = 21.sp,
+                fontWeight = FontWeight.Normal
+            )
+            repeat(3) { index ->
+                Box(
+                    modifier = Modifier
+                        .size(5.dp)
+                        .clip(CircleShape)
+                        .background(
+                            Color.White.copy(
+                                alpha = if (index <= phase.toInt()) 0.85f else 0.28f
+                            )
+                        )
+                )
+            }
+        }
     }
 }
 
@@ -1434,10 +1620,10 @@ private fun ChatInputBar(
     value: String,
     onValueChange: (String) -> Unit,
     onSend: () -> Unit,
-    enabled: Boolean,
+    sendEnabled: Boolean,
     modifier: Modifier = Modifier
 ) {
-    val canSend = enabled && value.isNotBlank()
+    val canSend = sendEnabled && value.isNotBlank()
 
     Row(
         modifier = modifier
@@ -1449,8 +1635,8 @@ private fun ChatInputBar(
     ) {
         BasicTextField(
             value = value,
-            onValueChange = { if (enabled) onValueChange(it.take(160)) },
-            enabled = enabled,
+            // 发送请求期间输入框保持可编辑，只禁用发送按钮
+            onValueChange = { onValueChange(it.take(160)) },
             singleLine = true,
             cursorBrush = SolidColor(ResearchPurple),
             textStyle = TextStyle(
@@ -1556,7 +1742,12 @@ private fun HomeScreen(
         onCancelListening = onCancelSpeechListening
     )
     ShakeToListenEffect(
-        onShake = speechInputController.startListening
+        onShake = {
+            // 通话中摇一摇不触发语音聆听，避免和通话的录音通道抢麦克风
+            if (!state.isInCall) {
+                speechInputController.startListening()
+            }
+        }
     )
 
     Box(
@@ -1581,6 +1772,8 @@ private fun HomeScreen(
                 isDogListening = isDogListening,
                 isSignalAnimating = isSignalAnimating,
                 hasPlaybackAudio = hasPlaybackAudio,
+                isVoiceDialogActive = state.isListening || state.isSubmittingVoiceIntent,
+                errorMessage = state.errorMessage,
                 statusLabel = statusLabel,
                 speechTranscript = state.currentVoiceTranscript.takeIf {
                     state.isListening || state.isSubmittingVoiceIntent
@@ -1796,9 +1989,15 @@ private fun rememberSpeechInputController(
         releaseRecognizer()
         cancelBackendRecording()
         isStreamingSpeech = latestOnStartStreaming {
-            Log.d(SpeechLogTag, "Streaming ASR unavailable; falling back to uploaded recording")
-            isStreamingSpeech = false
-            startBackendRecording()
+            // 流式识别的失败回调可能在用户早已结束对话后才到（如 socket 迟迟才断开）；
+            // 只有还在流式聆听中才回退到本地录音，避免麦克风凭空自启
+            if (isStreamingSpeech) {
+                Log.d(SpeechLogTag, "Streaming ASR unavailable; falling back to uploaded recording")
+                isStreamingSpeech = false
+                startBackendRecording()
+            } else {
+                Log.d(SpeechLogTag, "Ignoring streaming ASR failure; listening flow already ended")
+            }
         }
         if (!isStreamingSpeech) {
             Log.d(SpeechLogTag, "Streaming ASR client unavailable; falling back to uploaded recording")
@@ -2177,6 +2376,8 @@ private fun HomeCenterStage(
     isDogListening: Boolean,
     isSignalAnimating: Boolean,
     hasPlaybackAudio: Boolean,
+    isVoiceDialogActive: Boolean,
+    errorMessage: String?,
     statusLabel: String,
     speechTranscript: String?,
     onToggleConversation: () -> Unit,
@@ -2213,9 +2414,33 @@ private fun HomeCenterStage(
                 showPlaybackBubble = true
             }
         }
+        // 语音对话（聆听 + 理解）彻底结束后恢复播放气泡：
+        // 纯聊天回复不会产生新音频，上面按音频 id 触发的恢复不会重跑。
+        // errorMessage 也作为 key：启动失败（如权限被拒）时对话从未激活，
+        // 只能靠错误信号把点狗时藏起来的气泡找回来
+        val latestHasPlaybackAudio by rememberUpdatedState(hasPlaybackAudio)
+        LaunchedEffect(isVoiceDialogActive, errorMessage) {
+            if (!isVoiceDialogActive) {
+                // 稍等片刻，跳过「说完话 → 等识别结果」之间的短暂空档
+                delay(1200)
+                if (latestHasPlaybackAudio) {
+                    showPlaybackBubble = true
+                }
+            }
+        }
         LaunchedEffect(isDogListening) {
             if (isDogListening != renderedDogListening) {
                 isDogTransitioning = true
+            }
+        }
+        // 语音启动失败（如权限被拒、识别器启动异常）时立即解锁狗狗，
+        // 不用等 10 秒兜底超时，期间点狗狗才不会没反应
+        LaunchedEffect(isDogListening, errorMessage) {
+            if (errorMessage != null && isDogInteractionLocked && !isDogTransitioning &&
+                isDogListening == renderedDogListening
+            ) {
+                isDogInteractionLocked = false
+                dogInteractionLockTarget = null
             }
         }
         LaunchedEffect(dogInteractionLockTarget) {
@@ -2259,7 +2484,9 @@ private fun HomeCenterStage(
                     onAnimationEnd = {
                         renderedDogListening = latestDogListening
                         isDogTransitioning = false
-                        if (dogInteractionLockTarget == latestDogListening) {
+                        // 过渡动画结束后狗狗已与真实状态同步；即使目标状态在动画期间
+                        // 又翻转回去（如启动失败），也说明流程已终止，直接解锁
+                        if (dogInteractionLockTarget != null) {
                             isDogInteractionLocked = false
                             dogInteractionLockTarget = null
                         }
@@ -4569,6 +4796,12 @@ private fun AudioLibraryScreen(
     val context = LocalContext.current
     var selectedTab by remember { mutableStateOf(AudioLibraryTab.Library) }
     val mockLibrary = remember { exploreMockLibrary() }
+    // 真实数据优先：对应列表非空时展示真实内容，为空时才回退到演示数据
+    val displayLibrary = AudioLibrary(
+        recommended = state.library.recommended.ifEmpty { mockLibrary.recommended },
+        uploads = state.library.uploads.ifEmpty { mockLibrary.uploads },
+        history = state.library.history.ifEmpty { mockLibrary.history }
+    )
     val uploadPicker = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.OpenDocument()
     ) { uri ->
@@ -4607,7 +4840,7 @@ private fun AudioLibraryScreen(
             Box(modifier = Modifier.weight(1f)) {
                 when (selectedTab) {
                     AudioLibraryTab.Library -> AudioLibraryContent(
-                        library = mockLibrary,
+                        library = displayLibrary,
                         activeAudio = state.activeAudio,
                         playback = state.playback,
                         onPlay = onPlay,
@@ -4615,7 +4848,7 @@ private fun AudioLibraryScreen(
                     )
 
                     AudioLibraryTab.Uploads -> UploadsContent(
-                        uploads = mockLibrary.uploads,
+                        uploads = displayLibrary.uploads,
                         onStartUpload = openUploadPicker,
                         onRetryUpload = onRetryUpload,
                         onCompleteUpload = onCompleteUpload,
@@ -4625,7 +4858,7 @@ private fun AudioLibraryScreen(
                     )
 
                     AudioLibraryTab.History -> HistoryContent(
-                        history = mockLibrary.history,
+                        history = displayLibrary.history,
                         playback = state.playback,
                         onPlay = onPlay,
                         onPauseOrResume = onPauseOrResume
@@ -4971,7 +5204,10 @@ private fun UploadHeroCard(
                 )
             }
         } else {
-            val canRetry = upload.status == UploadStatus.Failed && !upload.id.startsWith("remote-pending")
+            // 演示数据（mock-*）没有真实上传记录，重试会打到服务端 404
+            val canRetry = upload.status == UploadStatus.Failed &&
+                !upload.id.startsWith("remote-pending") &&
+                !upload.id.startsWith("mock-")
             Column(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalAlignment = Alignment.CenterHorizontally,

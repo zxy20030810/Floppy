@@ -9,9 +9,10 @@ android {
     compileSdk = 36
 
     val useMockApiOverride = providers.gradleProperty("floppy.useMockApi").orNull
+    // 默认走真实后端；仅在显式设置 floppy.useMockApi=true 时才用假数据
     val debugUseMockApi = useMockApiOverride ?: "false"
     val releaseUseMockApi = useMockApiOverride ?: "false"
-    val apiBaseUrl = providers.gradleProperty("floppy.apiBaseUrl").orNull ?: "http://172.22.159.11:8000/"
+    val apiBaseUrl = providers.gradleProperty("floppy.apiBaseUrl").orNull ?: "http://172.26.141.248:8000/"
 
     defaultConfig {
         applicationId = "com.floppy.app"

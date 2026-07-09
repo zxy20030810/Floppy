@@ -36,7 +36,8 @@ class MainActivity : ComponentActivity() {
             isAppearanceLightNavigationBars = false
         }
         val app = application as FloppyApplication
-        val playbackController = ExoPlaybackController(this)
+        // 进程级单例：旋转重建时不再 new 一个孤儿播放器（ViewModel 持有的是第一个）
+        val playbackController = ExoPlaybackController.shared(this)
         setContent {
             FloppyTheme {
                 val viewModel: FloppyViewModel = viewModel(

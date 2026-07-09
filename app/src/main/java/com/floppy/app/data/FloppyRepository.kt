@@ -17,6 +17,10 @@ interface FloppyRepository {
     val settings: Flow<AppSettings>
     val streamingSpeechClient: StreamingSpeechClient?
         get() = null
+    val realtimeCallClient: RealtimeCallClient?
+        get() = null
+    val userId: String
+        get() = "mobile_user"
 
     suspend fun saveProfile(profile: UserProfile)
     suspend fun updateSettings(settings: AppSettings)
